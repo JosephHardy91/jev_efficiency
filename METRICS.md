@@ -201,3 +201,38 @@ is a reasonable knee there. At the default batch size (8-9 per call) extraction 
 changes RIGHT not at all while costing a little coverage. Field-level utility alone (K=3) never prefers nulling at these
 settings; only the end-to-end effect on the rerank does. Caveats: 10 emails repeated, three runs per row, so differences
 among 0.6-0.9 are within noise; throughput in these short runs is noisy and was not used to choose a threshold.
+
+## 9. What drives end-to-end accuracy: "spindle" regression
+
+Nickname for an additive piecewise-linear model (a linear-spline GAM; MARS is the greedy-selection relative): the outcome
+is a sum of one function per variable, each linear with its own optional hinge `max(0, x − knot)`. Standard names for a
+single variable: segmented or broken-stick regression. `fit.py` fits it as a linear probability model on `collect.py` data:
+9,000 product-runs (60 runs = 10 budgets × 3 min-conf levels × 2 reps × 150 products; batch size B from 2 to 36; overall
+RIGHT 94.6%), standard errors clustered by call (846 calls), knots chosen per variable by leave-runs-out CV, kept only if CV
+error drops. There is no p-value-driven stepwise selection: models are pre-specified and nested, and we watch how B's
+coefficient moves. Coefficients are percentage points of P(RIGHT).
+
+| Model | B (per product) | min_conf 0.6 / 0.9 | Other terms |
+|---|---|---|---|
+| 1. B only | −0.58 | | R² 0.058 |
+| 2. + min_conf (factor) | −0.58 | +1.2 / +1.9 | |
+| 3. + email-level difficulty | −0.57 | +1.2 / +1.9 | search_miss −10.9, no_stock +3.0 |
+| 4. email fixed effects | −0.57 | +1.2 / +1.9 | R² 0.182 |
+| 5. + position in call | **−0.12** | +1.2 / +1.9 | position −0.91 per slot, R² 0.227 |
+| 6. spindle: knots B=9, position=14 | −0.36 below 9, −0.09 above | +1.2 / +1.9 | position −0.27 per slot below 14, **−2.0 above**; R² 0.249; CV-RMSE 0.1990 → 0.1961 |
+| 7. + nulls (mediator, direct effect) | −0.33 | +1.0 / +0.6 (ns) | n_null +1.2 |
+| 8. DID-style B × answer-is-none | −0.45 (stocked) | | interaction +0.31: B hurts products whose right answer is `none` less |
+
+Raw RIGHT by position within the call: 0-4 → 98.5%, 5-9 → 97.4%, 10-13 → 92.4%, 14-17 → 93.3%, 18-24 → 80.5%,
+25-40 → 61.4%.
+
+Counterfactual effect sizes (model 6): batch size 4 → 36 at position 0: −4.2 pts; min_conf 0 → 0.9: +1.9 pts; position 0 → 10
+/ 20 / 30 within a call: −2.7 / −15.8 / −35.9 pts.
+
+Reading: most of what looks like "batch size hurts" is **position within the call**: once position is controlled, B's own
+slope falls from −0.57 to about −0.1 points per product. Batch size matters because it creates late positions, and accuracy
+falls steeply from roughly position 14-18 on (near B\* = 16). min_conf is worth about +1 to +2 points and works through
+abstention (its coefficient shrinks once the null count is controlled). Caveats: the 10 sample emails repeat in a fixed cycle,
+so position is not randomized and is correlated with email composition (email fixed effects absorb each email's average
+difficulty, not email × position interactions); knots are picked from the data, so post-selection standard errors are
+optimistic; linear probability models near 100% are approximate. A randomized product order per call is the clean test.
