@@ -6,3 +6,4 @@ results.json
 sweep_results.jsonl
 # never commit credentials
 .env
+runs/

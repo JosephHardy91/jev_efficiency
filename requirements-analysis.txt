@@ -1,0 +1,2 @@
+# optional: only for fit.py (regression analysis)
+numpy
