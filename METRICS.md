@@ -89,8 +89,10 @@ best observed throughput):
 | 36,000 | 25 | 6 | 97.4 | 223k | 91.8% | 0.822 |
 | 48,000 | 33 | 5 | 89.4 | 203k | 81.5% | 0.743 |
 
-The 12k row exceeded the published request and token rates for its ~2.3 s burst without visible throttling; the
-sustained rate was **not** measured (a planned 8,000-product, ~1-minute run was not executed).
+The 12k row ran above the published request and token rates for its ~2.3 s burst, but the SDK retries 429s by default
+(2 retries, honoring `Retry-After`), so any throttling was hidden inside latency. These throughputs are therefore upper
+bounds until re-measured with `--max-retries 0`. The sustained rate was **not** measured (a planned 8,000-product,
+~1-minute run was not executed).
 
 **Per-phase results, 100 products** (10 emails × 10, nulling at 0.6):
 
@@ -116,3 +118,31 @@ python capacity.py --calls 1 --tau 3000 --ref 6410   # the single-call estimate 
 python sweep.py                                      # the budget sweep (~$0.4)
 python -u demo.py --copies 10 --budget 12000         # per-phase scorecard for one setting
 ```
+
+## 7. Burst dynamics and risk of 429 (model; not validated)
+
+**Sliding window.** With window `W`=60 s, trailing usage `S(t) = ∫[t−W,t] u` and slack `s(t) = C − S(t)`, so
+`ds/dt = u(t−W) − u(t)`. Idle time is not banked beyond `W` if the limiter is a sliding log (a token bucket would bank).
+A burst at rate `q_b` for `τ_b` seconds uses `X = q_b·τ_b`. Its start stays in the window for 60 s, so for the remaining
+`60 − τ_b` seconds only `s = C − S_prior − X` is left and the sustainable rate is `s / (60 − τ_b)`; capacity returns at
+`q_b` over the `τ_b` seconds after that mark. Guaranteeing headroom `X` at every instant requires `ū ≤ (C − X)/W`.
+
+**Burst means changing B.** Raising B sends more products per request (tokens/s cap the gain at B\*). Throughput
+`p(B) = min(R·B/c, T/τ)` is piecewise linear with a kink at B\*, but the **probability of being fulfilled is not linear
+in B**: calls are lumpy (each carries `B·τ` tokens at once) and larger B means a larger quantum and higher variance.
+Toy model, per-second hard cap `cap`=250k tokens/s, Poisson call arrivals, `τ`=2.34k: usage per second has mean `q·τ`
+and std `τ·√(q·B)`, so `P(429 in a second) ≈ 1 − Φ((cap − q·τ)/(τ·√(q·B)))`.
+
+| Utilization | B=4 | B=9 | B=16 | B=25 |
+|---|---|---|---|---|
+| 60% | 0.4% | 3.8% | 9.1% | 14.3% |
+| 80% | 12.4% | 22.1% | 28.2% | 32.2% |
+| 90% | 29.3% | 35.8% | 39.3% | 41.4% |
+
+Expected fulfilled throughput `p(B)·(1 − risk(B))` peaks below B\*: B=9 → 58.7/s, **B=12 → 64.5/s**, B=14 → 60.3/s,
+B=16 → 53.5/s (vs 106.7/s nominal at B=16). A risk-aware utility is `HM(a(B), p̂·(1 − risk))`, and its optimum sits below
+B\* by a margin set by risk tolerance. Paced (evenly spaced) dispatch would shrink the variance term. The assumptions
+(Poisson arrivals, hard per-second cap) are unverified, so read the table for shape only.
+
+**To measure instead of assume:** run `demo.py --max-retries 0 --quiet --no-report --no-oracle --copies N --budget b`
+at increasing load; plot `SUMMARY.rate_limited` against utilization and batch size, and inspect `max_retry_after_s`.
