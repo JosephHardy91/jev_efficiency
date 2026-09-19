@@ -46,6 +46,10 @@
   backoff (0.5-5 s) and honors `Retry-After`, so a throttled call would only have shown up as extra latency. A ~2.3 s
   burst ran at ~44 requests/s and ~307k tokens/s (above both published rates), but we cannot say it was *unthrottled*.
   Re-measure with `--max-retries 0`, which surfaces and counts each 429 (`SUMMARY.rate_limited`).
+* **Risk numbers from an earlier Poisson-arrival model were retracted** (50% per-second risk at B\*, retry-feedback cliffs at
+  58-70% utilization, fulfilled-throughput peak near B=12). A paced dispatcher has no arrival variance. The current model is
+  METRICS.md section 7 / `risk.py`: risk above B\* is `1 − (B*/B)^(20·t_b)` for exact accounting, and B\* is risk-free
+  only if the token accounting `ε` is a guaranteed upper bound. `ε` is unknown and carried through as a distribution.
 * A 429 is nonfulfillment, not a size problem. `run_batch` waits `Retry-After` and resends the **same** batch; splitting
   it (the response to other errors such as context-too-large) would send more requests and worsen the 429.
 * **Open question:** does the limiter refresh per second (fixed window / token bucket) or track a rolling window? It
