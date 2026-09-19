@@ -62,6 +62,8 @@ export TYPESAFE_API_KEY=...                         # create one at https://cons
 | `demo.py` | The pipeline: catalog, option sets, search, two-pass extraction, rerank, batching, scorecard, report |
 | `capacity.py` | Capacity planner: batch size vs throughput / accuracy / availability under the published limits |
 | `sweep.py` | Runs `demo.py` across token budgets and `--min-conf` values (`--min-confs`) and ranks them: end-to-end accuracy, answered accuracy vs coverage, throughput, utility |
+| `collect.py` | Runs `demo.py` over a budget × min-conf grid and keeps per-product records in `runs/` (input for `fit.py`) |
+| `fit.py` | "Spindle" regression (additive piecewise-linear model, a separate hinge per variable) of end-to-end accuracy on products per call, position, min-conf and confounders. Needs `pip install -r requirements-analysis.txt` |
 | `risk.py` | `risk_429(B, t_b)`: risk of a 429 when running above B\*, with the unknown token-accounting error carried through. Importable for simulations |
 | `EXTENDING.md` | How to adapt the pipeline to a new workflow |
 | `METRICS.md` | Every metric, formula and measured result |
