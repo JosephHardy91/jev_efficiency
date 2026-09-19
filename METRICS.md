@@ -119,30 +119,50 @@ python sweep.py                                      # the budget sweep (~$0.4)
 python -u demo.py --copies 10 --budget 12000         # per-phase scorecard for one setting
 ```
 
-## 7. Burst dynamics and risk of 429 (model; not validated)
+## 7. Burst dynamics and risk of a 429 (model; not validated against the live limiter)
 
 **Sliding window.** With window `W`=60 s, trailing usage `S(t) = ∫[t−W,t] u` and slack `s(t) = C − S(t)`, so
-`ds/dt = u(t−W) − u(t)`. Idle time is not banked beyond `W` if the limiter is a sliding log (a token bucket would bank).
-A burst at rate `q_b` for `τ_b` seconds uses `X = q_b·τ_b`. Its start stays in the window for 60 s, so for the remaining
-`60 − τ_b` seconds only `s = C − S_prior − X` is left and the sustainable rate is `s / (60 − τ_b)`; capacity returns at
-`q_b` over the `τ_b` seconds after that mark. Guaranteeing headroom `X` at every instant requires `ū ≤ (C − X)/W`.
+`ds/dt = u(t−W) − u(t)`. Spendable now is what expired from the window plus any slack above the reserve; the past
+schedule fixes the present allotment. Idle time is not banked beyond `W` if the limiter is a sliding log (a token bucket
+would bank). Guaranteeing headroom `X` at every instant requires `ū ≤ (C − X)/W`. A side simulation (not in the repo)
+of bursts that spend a fraction `f` of current slack showed the burst series bounded by `C` (no window exhaustion) and
+settling for `f < 1`, and cycling with period `W` for `f = 1` (spend everything = no reserve).
 
-**Burst means changing B.** Raising B sends more products per request (tokens/s cap the gain at B\*). Throughput
-`p(B) = min(R·B/c, T/τ)` is piecewise linear with a kink at B\*, but the **probability of being fulfilled is not linear
-in B**: calls are lumpy (each carries `B·τ` tokens at once) and larger B means a larger quantum and higher variance.
-Toy model, per-second hard cap `cap`=250k tokens/s, Poisson call arrivals, `τ`=2.34k: usage per second has mean `q·τ`
-and std `τ·√(q·B)`, so `P(429 in a second) ≈ 1 − Φ((cap − q·τ)/(τ·√(q·B)))`.
+**Burst means changing B.** Running above B\* at the maximum request rate (20 calls/s) demands tokens at `B/B*` times
+the cap. If tokens are a hard per-second flow, nothing above B\* adds throughput, so `B_max_burst = B*`. A full-rate
+burst of `τ` seconds from a baseline of `d` products/s at batch `B_s` needs
+`B_b(τ) = c·q_max·τ / (R − c·d·(60−τ)/B_s)`, which rises to B\* at τ = 60 s. If tokens are instead a bankable minute
+pool, a burst above the per-second rate needs `B > B*` (same formula with `q_b > q_max`) while
+`(d·(60−τ) + q_b·τ)·τ_tok ≤ T`; accuracy falls past B≈20-25.
 
-| Utilization | B=4 | B=9 | B=16 | B=25 |
-|---|---|---|---|---|
-| 60% | 0.4% | 3.8% | 9.1% | 14.3% |
-| 80% | 12.4% | 22.1% | 28.2% | 32.2% |
-| 90% | 29.3% | 35.8% | 39.3% | 41.4% |
+**Risk of a 429 as a function of B and time at B (implemented in `risk.py`).** Dispatch is paced, so usage per second is
+deterministic; the only randomness is `ε`, the **unknown** relative error of the token accounting
+(actual = planned·(1+ε)), which is carried through as a distribution and never estimated. At the maximum request rate,
+planned utilization is `B/B*`, so:
 
-Expected fulfilled throughput `p(B)·(1 − risk(B))` peaks below B\*: B=9 → 58.7/s, **B=12 → 64.5/s**, B=14 → 60.3/s,
-B=16 → 53.5/s (vs 106.7/s nominal at B=16). A risk-aware utility is `HM(a(B), p̂·(1 − risk))`, and its optimum sits below
-B\* by a margin set by risk tolerance. Paced (evenly spaced) dispatch would shrink the variance term. The assumptions
-(Poisson arrivals, hard per-second cap) are unverified, so read the table for shape only.
+```
+per-second hazard      h(B) = S_ε(B*/B − 1)                     S_ε = P(ε > ·)
+risk-free batch size   B_α = B* / (1 + Q_ε(1 − α))              B_safe = B*/(1+ε_max) for a hard bound ε ≤ ε_max
+call admit probability a(B) = E_ε[ min(1, B* / (B·(1+ε))) ]     unit risk per call = 1 − a(B); 1 − B*/B when ε = 0
+risk_429(B, t_b)       = 1 − a(B)^(20·t_b)                      ε = 0, B > B*:  1 − (B*/B)^(20·t_b)
+expected 429s          = 20·t_b·(1 − a(B));   mean time to first 429 = 1 / (20·(1 − a(B)))
+```
 
-**To measure instead of assume:** run `demo.py --max-retries 0 --quiet --no-report --no-oracle --copies N --budget b`
-at increasing load; plot `SUMMARY.rate_limited` against utilization and batch size, and inspect `max_retry_after_s`.
+"B\* is risk-free" is a statement about `F_ε`, not about B\*: the risk at B\* is `P(ε > 0)`, zero only if the accounting is
+a guaranteed upper bound. The steepness of `h` near B\* is the density of `ε` at 0. With bankable slack (baseline token
+utilization `u_b`, overshoot `x = B/B* − 1`) risk is 0 until the pool drains at
+`t_ex(ε) = W·(1 − (1+ε)·u_b) / ((1+ε)·(1 + x − u_b))` and follows the formula on `t_b − t_ex` afterwards. `mode` in
+`risk.py` selects independent per-call error (`1 − E[a]^n`) or one systematic bias per burst (`E[1 − a_ε^n]`).
+
+Premises: paced dispatch at the request cap; a window already full at B\* (no slack) unless `u_b` is given; the limiter
+rejects excess tokens at per-call granularity; calls treated as independent.
+
+**Retracted.** An earlier version of this section modeled random (Poisson) call arrivals, which gives a 50% per-second
+risk at B\* and 19-35% at B=12-14. That does not apply to a paced dispatcher and was removed, together with two
+conclusions that depended on it (expected fulfilled throughput peaking near B=12; retry-feedback "cliffs" at 58-70%
+utilization).
+
+**To measure instead of assume:** run `demo.py --max-retries 0 --quiet --no-report --no-oracle --copies N --budget b` at
+increasing load and batch size; compare `SUMMARY.rate_limited` with `risk_429`, and inspect `max_retry_after_s` to tell a
+sliding window from a fixed one. The `usage.input_tokens` on each response gives actual tokens per call, from which the
+distribution of `ε` could be examined.
