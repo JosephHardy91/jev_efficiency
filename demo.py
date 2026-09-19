@@ -185,8 +185,9 @@ def arg(name: str, default, cast=float):
 BUDGET = arg("--budget", 12_000, int)  # est. input tokens per call; published limit is 64k (32k state + longest question). Swept 3k-48k: harmonic mean of accuracy and throughput peaks at ~12k (9 products/call)
 CONF_MIN = arg("--min-conf", 0.6)  # Choice confidence below this -> the field is treated as null
 COPIES = arg("--copies", 1, int)
+MAX_RETRIES = arg("--max-retries", 2, int)  # SDK default 2 silently retries 429s; use 0 to make every 429 visible and counted
 QUIET, NO_REPORT, NO_ORACLE = "--quiet" in sys.argv, "--no-report" in sys.argv, "--no-oracle" in sys.argv
-STATS = {"products": 0, "tokens": 0, "retries_or_splits": 0}
+STATS = {"products": 0, "tokens": 0, "retries_or_splits": 0, "rate_limited": 0, "retry_after_s": []}
 RATE_TPS, RATE_RPS = 250_000, 20  # published limits: 250k input tokens/s, 1,200 requests/min
 # requests in flight so that (tokens per call x calls in flight) stays inside the token rate (assuming ~1 s per call), and inside the request rate
 WORKERS = arg("--workers", max(1, min(RATE_RPS, RATE_TPS // BUDGET)), int)
@@ -320,7 +321,7 @@ def unpack(c, k: int) -> dict:
     return out
 
 
-def run_batch(R, items: list[dict]) -> list[dict]:
+def run_batch(R, items: list[dict], tries: int = 0) -> list[dict]:
     T = R["tracker"]
     bid = T.new_batch(len(items))
     try:
@@ -374,8 +375,22 @@ def run_batch(R, items: list[dict]) -> list[dict]:
         with T.lock:
             STATS["products"] += len(items)
         return items
-    except Exception as ex:  # e.g. context too large: split the batch and retry
-        T.batches[bid]["split"] = True
+    except Exception as ex:
+        from typesafe_sdk import TypeSafeRateLimitError
+
+        T.batches[bid]["split"] = True  # this attempt is superseded either way
+        if isinstance(ex, TypeSafeRateLimitError):
+            # a 429 is nonfulfillment, not a size problem: wait as told and resend the SAME batch (halving would send more requests)
+            wait = (ex.retry_after_ms or 1000) / 1000
+            with T.lock:
+                STATS["rate_limited"] += 1
+                STATS["retry_after_s"].append(wait)
+            if tries >= 5:
+                raise
+            print(f"[{T.now():5.2f}s] batch {bid} 429 -> Retry-After {wait:.2f}s, resending {len(items)} products", flush=True)
+            time.sleep(wait)
+            return run_batch(R, items, tries + 1)
+        # anything else (e.g. context too large): split the batch and retry
         STATS["retries_or_splits"] += 1
         if len(items) == 1:
             raise
@@ -473,10 +488,10 @@ def main() -> None:
 
     if not os.environ.get("TYPESAFE_API_KEY"):
         sys.exit("Set TYPESAFE_API_KEY (or run with --offline).")
-    from typesafe_sdk import Choice, TypeSafeClient
+    from typesafe_sdk import Choice, RetryPolicy, TypeSafeClient
 
     batches = pack(items)
-    R = {"client": TypeSafeClient(timeout=120.0), "Choice": Choice, "tracker": Tracker()}
+    R = {"client": TypeSafeClient(timeout=120.0, retry=RetryPolicy(max_retries=MAX_RETRIES)), "Choice": Choice, "tracker": Tracker()}
     print(f"{len(items)} products packed into {len(batches)} batch(es) of {[len(b) for b in batches]} "
           f"(budget {BUDGET:,} est. tok/call, {WORKERS} in flight, null fields below conf {CONF_MIN})\n", flush=True)
 
@@ -488,7 +503,7 @@ def main() -> None:
         while not stop.wait(5):
             now = R["tracker"].now()
             print(f"  [{now:5.1f}s] {STATS['products']:>6,} products done | last 5s: {(STATS['products'] - last_p) / 5:6.1f} products/s, "
-                  f"{(STATS['tokens'] - last_t) / 5:>8,.0f} tok/s | splits/errors {STATS['retries_or_splits']}", flush=True)
+                  f"{(STATS['tokens'] - last_t) / 5:>8,.0f} tok/s | 429s {STATS['rate_limited']} | splits/errors {STATS['retries_or_splits']}", flush=True)
             last_p, last_t = STATS["products"], STATS["tokens"]
 
     if QUIET:
@@ -525,7 +540,8 @@ def main() -> None:
     print(f"{n} products in {wall:.2f}s wall = {wall / n * 1000:.0f} ms/product, {len(R['tracker'].batches)} batch(es), "
           f"~{int(tokens):,} input tokens (~${tokens * 0.042 / 1e6:.5f}), estimator chars/token now {CPT:.2f}")
     print("SUMMARY " + json.dumps({"budget": BUDGET, "workers": WORKERS, "n": n, "wall": wall, "products_per_s": n / wall, "tok_per_s": tokens / wall,
-                                    "right": sum(r["ok"] for r in records) / n, "batches": len(R["tracker"].batches)}))
+                                    "right": sum(r["ok"] for r in records) / n, "batches": len(R["tracker"].batches),
+                                    "rate_limited": STATS["rate_limited"], "max_retry_after_s": max(STATS["retry_after_s"], default=0), "sdk_max_retries": MAX_RETRIES}))
     if not NO_REPORT:
         write_report(records, R["tracker"], card, n, wall)
 

@@ -40,6 +40,7 @@ export TYPESAFE_API_KEY=...                         # create one at https://cons
 | `--workers N` | `min(20, 250000 // budget)` | Calls in flight. Derived from the published 250k tok/s and 1,200 req/min limits |
 | `--quiet` | off | Suppress per-stage lines; print a 5-second throughput ticker instead |
 | `--no-report` | off | Skip `report.html` / `results.json` (use for large runs) |
+| `--max-retries N` | 2 | SDK retries for 429/5xx (SDK default 2 silently retries 429s with backoff). Use `0` to make every 429 visible: it is counted and the batch is resent after `Retry-After` |
 | `--no-oracle` | off | Skip the extra rerank run fed the *true* specs (saves one call per batch) |
 | `--offline` | off | No Jev calls: print search rank of the gold SKU per email |
 
