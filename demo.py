@@ -617,6 +617,7 @@ def main() -> None:
                                     "right": sum(r["ok"] for r in records) / n, "batches": len(R["tracker"].batches),
                                     "min_conf": CONF_MIN, "answered_acc": next(r for r in CURVE_ROWS if r["t"] == CONF_MIN)["all"]["acc"],
                                     "coverage": next(r for r in CURVE_ROWS if r["t"] == CONF_MIN)["all"]["cov"],
+                                    "utility": next(r for r in CURVE_ROWS if r["t"] == CONF_MIN)["all"]["util"], "wrong_cost": WRONG_COST,
                                     "best_conf_hm": max((r for r in CURVE_ROWS if r["t"] >= CONF_MIN), key=lambda r: (r["all"]["hm"], -r["t"]))["t"],
                                     "rate_limited": STATS["rate_limited"], "max_retry_after_s": max(STATS["retry_after_s"], default=0), "sdk_max_retries": MAX_RETRIES}))
     if not NO_REPORT:
