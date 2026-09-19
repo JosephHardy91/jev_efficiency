@@ -8,6 +8,8 @@ follows the rating system, follow-up questions follow the category).
     .venv/bin/python demo.py --copies 10           # 100 emails: watch the packer split into batches
     .venv/bin/python demo.py --budget 20000        # est. tokens per call (Jev limit: 64k)
     .venv/bin/python demo.py --min-conf 0.7        # fields below this confidence become null
+    .venv/bin/python demo.py --min-conf 0          # no nulling: the min-conf curve is then exact for every threshold
+    .venv/bin/python demo.py --wrong-cost 3        # curve utility: a wrong field costs 3, an abstention 0
     .venv/bin/python demo.py --offline             # search only, no API key
 """
 
@@ -187,6 +189,7 @@ CONF_MIN = arg("--min-conf", 0.6)  # Choice confidence below this -> the field i
 COPIES = arg("--copies", 1, int)
 MAX_RETRIES = arg("--max-retries", 2, int)  # SDK default 2 silently retries 429s; use 0 to make every 429 visible and counted
 QUIET, NO_REPORT, NO_ORACLE = "--quiet" in sys.argv, "--no-report" in sys.argv, "--no-oracle" in sys.argv
+WRONG_COST = arg("--wrong-cost", 1.0)  # min-conf curve utility: +1 per correct field, -WRONG_COST per wrong field, 0 per abstention
 STATS = {"products": 0, "tokens": 0, "retries_or_splits": 0, "rate_limited": 0, "retry_after_s": []}
 RATE_TPS, RATE_RPS = 250_000, 20  # published limits: 250k input tokens/s, 1,200 requests/min
 # requests in flight so that (tokens per call x calls in flight) stays inside the token rate (assuming ~1 s per call), and inside the request rate
@@ -447,6 +450,76 @@ def oracle_rerank(R, done: list[dict]) -> dict[int, str]:
         return {i: c for part in ex.map(one, pack(done)) for i, c in part.items()}
 
 
+# ------------------------------------------------ min-conf tuning: precision vs coverage, re-thresholded offline
+CURVE_T = (0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
+CURVE_ROWS: list[dict] = []
+
+
+def spec_at(it: dict, t: float) -> dict:
+    """Rebuild a product's spec as if the run had used --min-conf t, from the stored per-field confidences (no API calls).
+    Mirrors run_batch's assembly, including the cascade (no rating system => no rating; category picks the follow-up).
+    Exact for t >= the run's own --min-conf: fields nulled at run time were never asked in pass 2."""
+    def val(f):
+        return None if f["choice"] == NONE or f["conf"] < t else f["choice"]
+
+    p1, p2 = it["passes"][0]["fields"], it["passes"][1]["fields"]
+    v = {k: val(f) for k, f in p1.items()}
+    sp = {"qty": int(float(v["qty"].replace(",", ""))) if v["qty"] else None, "qty_uom": v["qty_uom"], "category": v["category"],
+          "material": v["material"], "size_unit": v["size_unit"], "rating_system": v["rating_system"]}
+    unit = sp["size_unit"] or "IPS"
+    size = val(p2["size"])
+    sp["size_raw"] = f"{size} {unit}" if size else None
+    sp["size_in"] = float(size) if size and unit == "IPS" else None
+    rating = val(p2["rating"]) if "rating" in p2 and sp["rating_system"] else None
+    sp["rating"] = f"{sp['rating_system']}{rating}" if rating else None
+    follow = FOLLOWUPS.get(sp["category"])
+    if follow:
+        sp[follow[0]] = val(p2[follow[0]]) if follow[0] in p2 else None
+    return sp
+
+
+def conf_curve(done: list[dict]) -> str:
+    """Accuracy on answered fields vs coverage at each threshold, per pass and pooled, plus HM(accuracy, coverage) and a
+    utility (+1 right, -WRONG_COST wrong, 0 abstained; per applicable field). Picks the best threshold by each."""
+    diff = sum(any(spec_at(it, CONF_MIN).get(k) != it["spec"].get(k) for k in set(spec_at(it, CONF_MIN)) | set(it["spec"])) for it in done)
+    CURVE_ROWS.clear()
+    for t in sorted(set(CURVE_T) | {CONF_MIN}):
+        row = {"t": t}
+        for name, fields in (("p1", PASS1_FIELDS), ("p2", PASS2_FIELDS), ("all", PASS1_FIELDS + PASS2_FIELDS)):
+            right = wrong = abst = 0
+            for it in done:
+                sp, truth = spec_at(it, t), TRUTH[it["i"] % len(EMAILS)]
+                for f in fields:
+                    if truth[f] is None:
+                        continue
+                    got = sp.get(f)
+                    right += got == truth[f]
+                    wrong += got is not None and got != truth[f]
+                    abst += got is None
+            n, ans = right + wrong + abst, right + wrong
+            acc, cov = (right / ans if ans else 1.0), (ans / n if n else 0.0)
+            row[name] = {"acc": acc, "cov": cov, "right": right, "wrong": wrong, "abst": abst,
+                         "hm": 2 * acc * cov / (acc + cov) if acc + cov else 0.0, "util": (right - WRONG_COST * wrong) / n if n else 0.0}
+        CURVE_ROWS.append(row)
+    exact = [r for r in CURVE_ROWS if r["t"] >= CONF_MIN]  # rows below the run's own threshold are approximate: never picked
+    best_hm = max(exact, key=lambda r: (r["all"]["hm"], -r["t"]))["t"]
+    best_u = max(exact, key=lambda r: (r["all"]["util"], -r["t"]))["t"]
+    out = [f"  5. --min-conf curve (re-thresholded offline from stored confidences; accuracy is over answered fields, wrong-cost {WRONG_COST:g})",
+           f"    check: rebuilding specs at the run's own threshold {CONF_MIN:g} reproduces them for {len(done) - diff}/{len(done)} products",
+           "    t      | pass 1 acc / cov | pass 2 acc / cov | pooled acc  cov    wrong  abst |  HM(acc,cov)  utility"]
+    for r in CURVE_ROWS:
+        a, p1, p2 = r["all"], r["p1"], r["p2"]
+        approx = "~" if r["t"] < CONF_MIN else " "
+        tag = " <- run" if r["t"] == CONF_MIN else ""
+        tag += " *HM" if r["t"] == best_hm else ""
+        tag += " *utility" if r["t"] == best_u else ""
+        out.append(f"   {approx}{r['t']:<5.2f} | {p1['acc']:>7.1%} / {p1['cov']:<6.1%} | {p2['acc']:>7.1%} / {p2['cov']:<6.1%} | "
+                   f"{a['acc']:>9.1%} {a['cov']:>6.1%} {a['wrong']:>6} {a['abst']:>5} | {a['hm']:>11.3f} {a['util']:>8.3f}{tag}")
+    out.append(f"    best by HM(accuracy, coverage): {best_hm:g}; best by utility: {best_u:g}."
+               + ("  Rows marked ~ are below the run's --min-conf and approximate; run with --min-conf 0 for an exact curve." if CONF_MIN > 0 else ""))
+    return "\n".join(out)
+
+
 def scorecard(R, done: list[dict]) -> str:
     n = len(done)
     with_gold = [it for it in done if it["gold"]]
@@ -461,6 +534,7 @@ def scorecard(R, done: list[dict]) -> str:
     if not NO_ORACLE:
         ORACLE_TOP.update(oracle_rerank(R, done))
         out.append(f"    fed the true specs:        {rerank_breakdown(done, ORACLE_TOP)}")
+    out.append(conf_curve(done))
     return "\n".join(out)
 
 
@@ -541,6 +615,9 @@ def main() -> None:
           f"~{int(tokens):,} input tokens (~${tokens * 0.042 / 1e6:.5f}), estimator chars/token now {CPT:.2f}")
     print("SUMMARY " + json.dumps({"budget": BUDGET, "workers": WORKERS, "n": n, "wall": wall, "products_per_s": n / wall, "tok_per_s": tokens / wall,
                                     "right": sum(r["ok"] for r in records) / n, "batches": len(R["tracker"].batches),
+                                    "min_conf": CONF_MIN, "answered_acc": next(r for r in CURVE_ROWS if r["t"] == CONF_MIN)["all"]["acc"],
+                                    "coverage": next(r for r in CURVE_ROWS if r["t"] == CONF_MIN)["all"]["cov"],
+                                    "best_conf_hm": max((r for r in CURVE_ROWS if r["t"] >= CONF_MIN), key=lambda r: (r["all"]["hm"], -r["t"]))["t"],
                                     "rate_limited": STATS["rate_limited"], "max_retry_after_s": max(STATS["retry_after_s"], default=0), "sdk_max_retries": MAX_RETRIES}))
     if not NO_REPORT:
         write_report(records, R["tracker"], card, n, wall)
