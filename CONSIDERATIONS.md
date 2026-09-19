@@ -31,7 +31,9 @@
 
 ## Nulls (abstentions)
 
-* Any Choice answer with confidence below `--min-conf` (default 0.6) becomes `null`, and so does a `none` answer.
+* Any Choice answer with confidence below `--min-conf` (default 0.6) becomes `null`, and so does a `none` answer. The 0.6
+  default was chosen a priori; it is now checked in METRICS.md section 8: it helps at large batches (33 per call: RIGHT 73% → 86%)
+  and does nothing for accuracy at the default batch size, where it only costs a little coverage.
 * Confidence measures how concentrated the distribution is, not whether the answer is right. Several acceptable options
   spread probability; do not tune a threshold on one question type and reuse it on another.
 * A null size unit still uses the IPS size list in pass 2 as a working default; the unit stays null in the result.
