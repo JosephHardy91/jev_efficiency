@@ -61,9 +61,25 @@ export TYPESAFE_API_KEY=...                         # create one at https://cons
 | `demo.py` | The pipeline: catalog, option sets, search, two-pass extraction, rerank, batching, scorecard, report |
 | `capacity.py` | Capacity planner: batch size vs throughput / accuracy / availability under the published limits |
 | `sweep.py` | Runs `demo.py` across token budgets and ranks them by harmonic mean of accuracy and throughput |
+| `risk.py` | `risk_429(B, t_b)`: risk of a 429 when running above B\*, with the unknown token-accounting error carried through. Importable for simulations |
 | `EXTENDING.md` | How to adapt the pipeline to a new workflow |
 | `METRICS.md` | Every metric, formula and measured result |
 | `CONSIDERATIONS.md` | Findings, pitfalls, caveats and open questions |
+
+## Risk of a 429 above B\* (`risk.py`)
+
+```python
+from risk import risk_429, surface, b_star
+
+risk_429(18, 1)                                            # batch size 18 held for 1 s, eps = 0  ->  0.902
+risk_429(18, 1, eps=[0, 0.05, 0.1])                        # eps (token-accounting error) carried as samples
+risk_429(18, 1, eps={0: .5, .1: .5}, mode="systematic")    # one unknown bias for the whole burst
+risk_429(20, 30, u_b=0.7)                                  # with bankable slack from a 70%-utilized baseline
+surface([17, 18, 20], [0.1, 1, 5])                         # grid: rows are B, columns are t_b
+```
+
+`python risk.py --B 17,18,20 --t 0.1,1,5 --eps 0,0.1 --mode systematic` prints the grid. The model and its premises are in
+METRICS.md section 7; `python -m doctest risk.py` checks the closed forms.
 
 ## Cost
 
