@@ -29,6 +29,11 @@
   starts at 1.8 and recalibrates from real usage. Pass 1 and rerank estimate within ~20%; pass 2 undershoots 20-40%. Keep
   a margin under 64k. A failed call splits its batch in half and retries.
 
+* **Position within a call is the main driver of the accuracy loss with batch size** (METRICS.md section 9): controlling for it,
+  B's own effect is about −0.1 pts per product, while accuracy drops about 2 pts per position beyond ~14. Not randomized: the
+  sample emails cycle, so position tracks composition. Shuffle product order to test it, and consider capping products per
+  call near 14.
+
 ## Nulls (abstentions)
 
 * Any Choice answer with confidence below `--min-conf` (default 0.6) becomes `null`, and so does a `none` answer. The 0.6
