@@ -50,7 +50,10 @@ questions into an existing call: a call is the scarce resource (see METRICS.md).
 ## 4. Tune behaviour without code
 
 * `--min-conf X`: raise to abstain more, lower to answer more. Tune it on your data: confidence measures how
-  concentrated the distribution is, not overall correctness.
+  concentrated the distribution is, not overall correctness. Run `demo.py --min-conf 0` and read the scorecard's curve
+  (accuracy on answered fields vs coverage, with a utility from `--wrong-cost`), then confirm end to end with
+  `python sweep.py --budgets <yours> --min-confs 0,0.5,0.6,0.7,0.8,0.9`: the curve is field-level, only the sweep shows the
+  effect on the rerank.
 * `--budget N`: products per call. Re-run `sweep.py` when questions, option-list sizes or the model change.
 * `MODEL = "jev-latest"` moves when a new model ships; pin a versioned id (e.g. `jev-1.13.0`) once you have tuned
   thresholds against it.

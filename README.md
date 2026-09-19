@@ -36,7 +36,8 @@ export TYPESAFE_API_KEY=...                         # create one at https://cons
 |---|---|---|
 | `--copies N` | 1 | Repeat the 10 sample emails N times (load testing; repeats are not independent samples) |
 | `--budget N` | 12000 | Estimated input tokens per call. Sets products per call. Published limit is 64k (32k for state + longest question) |
-| `--min-conf X` | 0.6 | Any Choice answer below this confidence becomes `null` (abstention). `0` disables nulling |
+| `--min-conf X` | 0.6 | Any Choice answer below this confidence becomes `null` (abstention). `0` disables nulling. The scorecard prints a precision-vs-coverage curve so you can tune it; exact for thresholds at or above the run's own, so use `--min-conf 0` for the full curve |
+| `--wrong-cost K` | 1 | Utility used by the curve and `sweep.py`: +1 per correct field, −K per wrong field, 0 per abstention |
 | `--workers N` | `min(20, 250000 // budget)` | Calls in flight. Derived from the published 250k tok/s and 1,200 req/min limits |
 | `--quiet` | off | Suppress per-stage lines; print a 5-second throughput ticker instead |
 | `--no-report` | off | Skip `report.html` / `results.json` (use for large runs) |
@@ -47,7 +48,7 @@ export TYPESAFE_API_KEY=...                         # create one at https://cons
 ## Outputs
 
 * **Terminal**: live per-batch stage lines (`▶` start, `✓` done with seconds and estimated vs actual tokens), then a
-  per-phase scorecard, then a `SUMMARY {json}` line (used by `sweep.py`).
+  per-phase scorecard (ending with the `--min-conf` curve), then a `SUMMARY {json}` line (used by `sweep.py`).
 * **`report.html`**: self-contained x-ray. A stage tracker at the top replays the *recorded* timings (pizza-tracker
   style, speed selectable), followed by one collapsible row per email with: the email, every Choice's option set and
   probability distribution for both passes (NULL badges where confidence fell below the threshold), the values code
@@ -60,7 +61,7 @@ export TYPESAFE_API_KEY=...                         # create one at https://cons
 |---|---|
 | `demo.py` | The pipeline: catalog, option sets, search, two-pass extraction, rerank, batching, scorecard, report |
 | `capacity.py` | Capacity planner: batch size vs throughput / accuracy / availability under the published limits |
-| `sweep.py` | Runs `demo.py` across token budgets and ranks them by harmonic mean of accuracy and throughput |
+| `sweep.py` | Runs `demo.py` across token budgets and `--min-conf` values (`--min-confs`) and ranks them: end-to-end accuracy, answered accuracy vs coverage, throughput, utility |
 | `risk.py` | `risk_429(B, t_b)`: risk of a 429 when running above B\*, with the unknown token-accounting error carried through. Importable for simulations |
 | `EXTENDING.md` | How to adapt the pipeline to a new workflow |
 | `METRICS.md` | Every metric, formula and measured result |
