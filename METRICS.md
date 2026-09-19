@@ -166,3 +166,38 @@ utilization).
 increasing load and batch size; compare `SUMMARY.rate_limited` with `risk_429`, and inspect `max_retry_after_s` to tell a
 sliding window from a fixed one. The `usage.input_tokens` on each response gives actual tokens per call, from which the
 distribution of `ε` could be examined.
+
+## 8. Tuning `--min-conf` (null threshold)
+
+Confidence is the concentration of a Choice's distribution, so a threshold trades **accuracy on answered fields** against
+**coverage** (share of fields answered). Two tools:
+
+* **Offline curve** (printed at the end of every `demo.py` run): each product's spec is rebuilt at thresholds
+  0, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95 from the stored per-field confidences, mirroring `run_batch`'s assembly and cascade, with a
+  self-check that it reproduces the run's own specs. It reports accuracy/coverage per pass and pooled, `HM(accuracy,
+  coverage)`, and a utility `(right − K·wrong)/applicable fields` with `K = --wrong-cost`. It is exact for thresholds at or above
+  the run's own `--min-conf` (fields nulled at run time were never asked in pass 2), so run with `--min-conf 0` for the
+  full curve; rows below the run's threshold are marked `~` and never picked as best.
+* **Sweep** (`sweep.py --min-confs ...`): real runs at each threshold, because nulls also change what the rerank sees, which
+  the field-level curve cannot show.
+
+Results (100 products per run, 3 runs per row, `--wrong-cost 3`):
+
+| Budget (products/call) | min-conf | RIGHT (end to end) | Answered accuracy | Coverage | Utility |
+|---|---|---|---|---|---|
+| 48,000 (33) | 0 | 73.0% | 96.8% | 98.4% | 0.857 |
+| 48,000 (33) | 0.5 | 81.7% | 98.6% | 90.8% | 0.858 |
+| 48,000 (33) | 0.6 | 86.0% | 99.2% | 88.5% | 0.856 |
+| 48,000 (33) | 0.7 | 85.3% | 99.5% | 83.6% | 0.818 |
+| 48,000 (33) | 0.8 | 87.3% | 99.8% | 76.5% | 0.760 |
+| 48,000 (33) | 0.9 | 85.3% | 100.0% | 61.0% | 0.610 |
+| 12,000 (8) | 0 | 98.7% | 100.0% | 99.8% | 0.998 |
+| 12,000 (8) | 0.6 | 98.7% | 100.0% | 99.4% | 0.994 |
+| 12,000 (8) | 0.8 | 98.7% | 100.0% | 97.1% | 0.971 |
+
+Reading it: at large batches (33 per call) nulling lifts end-to-end accuracy by about 9-14 points, mostly by turning wrong
+extractions into abstentions before the rerank, and the gain plateaus from 0.6 upward while coverage keeps falling, so 0.6
+is a reasonable knee there. At the default batch size (8-9 per call) extraction is already near-perfect and nulling
+changes RIGHT not at all while costing a little coverage. Field-level utility alone (K=3) never prefers nulling at these
+settings; only the end-to-end effect on the rerank does. Caveats: 10 emails repeated, three runs per row, so differences
+among 0.6-0.9 are within noise; throughput in these short runs is noisy and was not used to choose a threshold.
