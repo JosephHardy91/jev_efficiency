@@ -42,11 +42,16 @@
 * Published (Models page): 64k tokens/request (32k for state + longest question), 250k tokens/s, 1,200 requests/min,
   Choice ≤ 255 options, $0.042/M input tokens (output free). The page says limits adjust dynamically; higher limits exist on
   custom/enterprise plans. The SDK retries `429`/`529` with backoff.
-* A ~2.3 s burst ran at ~44 requests/s and ~307k tokens/s, above both published rates, with no visible throttling.
-  Do not assume that is sustainable.
+* **429s were hidden in every measurement in METRICS.md §5.** The SDK's default `RetryPolicy` retries 429 twice with
+  backoff (0.5-5 s) and honors `Retry-After`, so a throttled call would only have shown up as extra latency. A ~2.3 s
+  burst ran at ~44 requests/s and ~307k tokens/s (above both published rates), but we cannot say it was *unthrottled*.
+  Re-measure with `--max-retries 0`, which surfaces and counts each 429 (`SUMMARY.rate_limited`).
+* A 429 is nonfulfillment, not a size problem. `run_batch` waits `Retry-After` and resends the **same** batch; splitting
+  it (the response to other errors such as context-too-large) would send more requests and worsen the 429.
 * **Open question:** does the limiter refresh per second (fixed window / token bucket) or track a rolling window? It
-  decides whether "always able to pull one more batch" costs anything (B=16 vs B=14 in METRICS.md §4). A burst test that
-  watches for `429`s would settle it.
+  decides whether "always able to pull one more batch" costs anything (B=16 vs B=14 in METRICS.md §4). A burst test with `--max-retries 0`
+  would settle it: read `Retry-After` (time until the oldest usage expires means a sliding window; time to the next
+  second boundary means a fixed window) and compare 429 rate against utilization.
 * The one-call speculative-fan-out design (all branches asked up front, rerank from email + shortlist) is an
   **unbuilt estimate**. It trades requests for tokens and needs about 1.4k tokens/product to reach 180 products/s.
   Rerank-from-email-only accuracy is untested.
