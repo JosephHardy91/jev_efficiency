@@ -29,16 +29,19 @@
   starts at 1.8 and recalibrates from real usage. Pass 1 and rerank estimate within ~20%; pass 2 undershoots 20-40%. Keep
   a margin under 64k. A failed call splits its batch in half and retries.
 
-* **Position within a call is the main driver of the accuracy loss with batch size** (METRICS.md section 9): controlling for it,
-  B's own effect is about −0.1 pts per product, while accuracy drops about 2 pts per position beyond ~14. Not randomized: the
-  sample emails cycle, so position tracks composition. Shuffle product order to test it, and consider capping products per
-  call near 14.
+* **Position within a call drives the accuracy loss with batch size** (METRICS.md section 10). A first analysis on the 10 fixed
+  emails in a fixed order overstated the mid-range loss because position was confounded with which email fell there. With
+  randomized order and 300 generated emails: RIGHT stays ~99% up to about position 13 (and ~99.6% at 16 products per call),
+  then falls about 3 pts per position (95.9% at positions 14-17, 84.9% at 18-24, 52.2% beyond 25). Batch size has no effect
+  of its own below ~28 once position is controlled. Cap products per call near 16 (B\*).
 
 ## Nulls (abstentions)
 
 * Any Choice answer with confidence below `--min-conf` (default 0.6) becomes `null`, and so does a `none` answer. The 0.6
-  default was chosen a priori; it is now checked in METRICS.md section 8: it helps at large batches (33 per call: RIGHT 73% → 86%)
-  and does nothing for accuracy at the default batch size, where it only costs a little coverage.
+  default was chosen a priori. METRICS.md section 8 (fixed emails) found it helped at large batches; the randomized run in
+  section 10 (300 generated emails) found no consistent effect on RIGHT (95.7% at 0 vs 95.8% at 0.6): a null on a product
+  with a stocked answer often turns it into `none` (RIGHT 66.8% with a null vs 96.2% without). Treat 0.6 as a coverage
+  trade-off, not an accuracy gain.
 * Confidence measures how concentrated the distribution is, not whether the answer is right. Several acceptable options
   spread probability; do not tune a threshold on one question type and reuse it on another.
 * A null size unit still uses the IPS size list in pass 2 as a working default; the unit stays null in the result.
