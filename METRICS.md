@@ -75,6 +75,10 @@ All assume even spending through the minute and B=16, c=3 unless stated. `N = c�
 
 ## 5. Measured results
 
+> **Correction (see section 10):** the accuracy-versus-batch-size numbers in this section and in section 9 come from the 10 fixed
+> emails in a fixed order, so which email landed in which position was confounded with email difficulty. Section 10 repeats
+> the experiment with randomization; there, accuracy at 16 products per call is 99.6%, not ~96%.
+
 **Budget sweep** (300 products, 2 runs each, nulling at 0.6; throughput measured in short bursts; HM normalized to
 best observed throughput):
 
@@ -202,7 +206,7 @@ changes RIGHT not at all while costing a little coverage. Field-level utility al
 settings; only the end-to-end effect on the rerank does. Caveats: 10 emails repeated, three runs per row, so differences
 among 0.6-0.9 are within noise; throughput in these short runs is noisy and was not used to choose a threshold.
 
-## 9. What drives end-to-end accuracy: "spindle" regression
+## 9. What drives end-to-end accuracy (legacy design: see the correction in section 10): "spindle" regression
 
 Nickname for an additive piecewise-linear model (a linear-spline GAM; MARS is the greedy-selection relative): the outcome
 is a sum of one function per variable, each linear with its own optional hinge `max(0, x − knot)`. Standard names for a
@@ -236,3 +240,37 @@ abstention (its coefficient shrinks once the null count is controlled). Caveats:
 so position is not randomized and is correlated with email composition (email fixed effects absorb each email's average
 difficulty, not email × position interactions); knots are picked from the data, so post-selection standard errors are
 optimistic; linear probability models near 100% are approximate. A randomized product order per call is the clean test.
+
+## 10. Designed experiment (randomized): accuracy versus batch size, position and min-conf
+
+Sections 5 and 9 used 10 fixed emails repeated in a fixed cycle, so position was correlated with email difficulty and
+the "position 10-13" dip partly reflected where the hard emails fell. This run fixes the design: **300 distinct generated
+emails** (`--gen 300`, about 20% ask for an unstocked item, truth known per email), **batch size assigned exactly**
+(`--per-call`), **product order shuffled** every run (`--shuffle`), and **run order randomized** (`collect.py --sizes
+4,8,12,16,20,24,28,32 --min-confs 0,0.6 --reps 2 --shuffle`): 32 runs, 9,600 product-runs, 4 independent shuffles per cell.
+
+RIGHT by assigned products per call (n ≈ 1,150 each): 4 → 99.6%, 8 → 99.7%, 12 → 99.2%, **16 → 99.6%**, 20 → 98.1%,
+24 → 96.0%, 28 → 92.0%, 32 → 80.9%. RIGHT by position within the call: 0-4 → 99.4%, 5-9 → 99.3%, 10-13 → 99.1%,
+14-17 → 95.9%, 18-24 → 84.9%, 25-40 → 52.2%.
+
+Spindle regression (`fit.py --design designed`, email-difficulty features, SEs clustered by call and by email):
+
+| Term | Estimate |
+|---|---|
+| B, position controlled | +0.06 pts/product below B=28 (about zero), −1.6 above 28 (identified by B=28 and 32 only) |
+| position | −0.13 pts/slot below 16, **−3.2 pts/slot above 16** (knot chosen by CV; CV-RMSE 0.1897 → 0.1771) |
+| min_conf 0.6, total effect | +0.1 pts (not significant); RIGHT 95.7% at min-conf 0 vs 95.8% at 0.6 |
+| min_conf 0.6, direct (n_null controlled) | +1.1 pts; each null costs −6.6 pts |
+| minimum detectable position slope | about 0.2 pts/slot (2.8 × SE) |
+
+Reading: (1) the position effect is real and much steeper than the fixed-email data suggested, but it starts near
+position 14-16, not earlier; up to about 16 products per call there is essentially no loss. (2) Batch size has no effect of its own
+below about 28 once position is controlled; it matters through the late positions it creates. (3) B\* = 16 is
+also where accuracy is still ~99.6%, so the throughput optimum in section 3 stands: re-running `capacity.py --acc
+"4:.996,8:.997,12:.992,16:.996,20:.981,24:.960,28:.920,32:.809"` gives HM 0.997 at B=16 (burst) and B=14 for the strict
+per-second reserve; the default accuracy table inside `capacity.py` still holds the older interpolated points. (4) `min_conf`
+has no consistent effect here (cell differences −0.7 to +2.1 pts): a null on a product with a stocked answer often
+turns a right answer into `none` (RIGHT 66.8% with a null vs 96.2% without, n = 328), while nulls on products whose right
+answer is `none` cost little (95.6% vs 98.4%). Nulling helped earlier only because the fixed emails were harder at
+large batch sizes. Caveats: emails are synthetic and templated (easier than real ones), one generator seed, the B > 28
+slope rests on two batch sizes, and knots are chosen from the same data, so standard errors are optimistic.
