@@ -42,6 +42,9 @@ export TYPESAFE_API_KEY=...                         # create one at https://cons
 | `--quiet` | off | Suppress per-stage lines; print a 5-second throughput ticker instead |
 | `--no-report` | off | Skip `report.html` / `results.json` (use for large runs) |
 | `--max-retries N` | 2 | SDK retries for 429/5xx (SDK default 2 silently retries 429s with backoff). Use `0` to make every 429 visible: it is counted and the batch is resent after `Retry-After` |
+| `--gen N` / `--gen-seed S` | off / 0 | Generate N distinct emails with known ground truth (about 20% ask for an unstocked item) instead of the 10 fixed ones |
+| `--per-call N` | off | Assign exactly N products per call (overrides `--budget` packing) |
+| `--shuffle SEED` | off | Shuffle product order before packing: randomizes which products share a call and their position |
 | `--no-oracle` | off | Skip the extra rerank run fed the *true* specs (saves one call per batch) |
 | `--offline` | off | No Jev calls: print search rank of the gold SKU per email |
 
@@ -62,7 +65,7 @@ export TYPESAFE_API_KEY=...                         # create one at https://cons
 | `demo.py` | The pipeline: catalog, option sets, search, two-pass extraction, rerank, batching, scorecard, report |
 | `capacity.py` | Capacity planner: batch size vs throughput / accuracy / availability under the published limits |
 | `sweep.py` | Runs `demo.py` across token budgets and `--min-conf` values (`--min-confs`) and ranks them: end-to-end accuracy, answered accuracy vs coverage, throughput, utility |
-| `collect.py` | Runs `demo.py` over a budget × min-conf grid and keeps per-product records in `runs/` (input for `fit.py`) |
+| `collect.py` | Runs `demo.py` over a grid and keeps per-product records in `runs/` (input for `fit.py`). Designed mode: `--gen 300 --sizes 4,8,...,32 --shuffle` assigns batch size, randomizes product order and run order |
 | `fit.py` | "Spindle" regression (additive piecewise-linear model, a separate hinge per variable) of end-to-end accuracy on products per call, position, min-conf and confounders. Needs `pip install -r requirements-analysis.txt` |
 | `risk.py` | `risk_429(B, t_b)`: risk of a 429 when running above B\*, with the unknown token-accounting error carried through. Importable for simulations |
 | `EXTENDING.md` | How to adapt the pipeline to a new workflow |
