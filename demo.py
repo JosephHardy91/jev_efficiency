@@ -8,6 +8,7 @@ follows the rating system, follow-up questions follow the category).
     .venv/bin/python demo.py --copies 10           # 100 emails: watch the packer split into batches
     .venv/bin/python demo.py --budget 20000        # est. tokens per call (Jev limit: 64k)
     .venv/bin/python demo.py --min-conf 0.7        # fields below this confidence become null
+    .venv/bin/python demo.py --gen 300 --per-call 16 --shuffle 1   # 300 generated emails, exactly 16 per call, random order
     .venv/bin/python demo.py --min-conf 0          # no nulling: the min-conf curve is then exact for every threshold
     .venv/bin/python demo.py --wrong-cost 3        # curve utility: a wrong field costs 3, an abstention 0
     .venv/bin/python demo.py --offline             # search only, no API key
@@ -108,6 +109,56 @@ def gold_sku(gold) -> str | None:
     return next(p["sku"] for p in CATALOG if (p["material"], p["category"], p["angle"], p["size"], p["rating"]) == (m, c, a, float(s), r))
 
 
+def find_sku(material, category, angle, size, rating) -> str | None:
+    return next((p["sku"] for p in CATALOG if (p["material"], p["category"], p["angle"], p["size"], p["rating"]) == (material, category, angle, float(size), rating)), None)
+
+
+def generate_emails(n: int, seed: int) -> list[tuple[str, str | None, dict]]:
+    """n distinct emails with known ground truth, drawn from a wider space than the catalog (about 20% ask for something not
+    stocked, so the right answer is `none`). Values stay inside the closed option sets. Returns (text, gold SKU or None, truth)."""
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        cat = rng.choices(["pipe", "elbow", "tee", "stub end", "flange adapter"], weights=[5, 2, 1, 1, 1])[0]
+        if cat == "pipe":
+            mat = rng.choices(["HDPE", "PVC", "FPVC"], weights=[6, 3, 2])[0]
+        else:
+            mat = "HDPE"
+        angle = rng.choice([90, 45, 90, 90, 30]) if cat == "elbow" else None
+        if mat == "HDPE":
+            size = rng.choice([2, 3, 4, 6, 8, 10, 12, 14, 16] * 6 + [18, 20])
+            system, rating = "DR", rng.choice(["7", "9", "11", "13.5", "17", "21"] if cat == "pipe" else ["11", "17"] * 3 + ["9", "13.5", "21"])
+        elif mat == "PVC":
+            size, system, rating = rng.choice([1, 2, 3, 4, 6, 8, 10, 12] * 6 + [14]), "SCH", rng.choice(["40", "80"])
+        else:
+            size, system, rating = rng.choice([4, 6, 8, 10, 12] * 6 + [3]), "DR", rng.choice(["18", "25"] * 4 + ["32.5"])
+        if cat == "pipe":
+            qty, uom, uom_word = rng.choice([100, 200, 250, 300, 400, 500, 600, 800, 1000, 1200, 1500, 2000, 2400, 3000, 5000]), "FT", rng.choice(["ft", "feet", "LF", "linear feet"])
+        else:
+            qty, uom, uom_word = rng.randint(2, 60), "EA", ""
+        qty_text = f"{qty:,}" if qty >= 1000 and rng.random() < 0.6 else str(qty)
+        size_txt = rng.choice([f'{size:g}"', f"{size:g} in", f"{size:g}-inch", f"{size:g} inch"])
+        rate_txt = (rng.choice([f"DR {rating}", f"DR{rating}", f"SDR {rating}"]) if system == "DR"
+                    else rng.choice([f"schedule {rating}", f"Sch {rating}", f"SCH{rating}"]))
+        mat_txt = {"HDPE": rng.choice(["HDPE", "poly", "black HDPE", "PE4710 HDPE", "polyethylene"]), "PVC": "PVC", "FPVC": rng.choice(["FPVC", "fusible PVC"])}[mat]
+        cat_txt = {"pipe": "pipe", "stub end": "stub ends", "flange adapter": "flange adapters", "tee": "tees",
+                   "elbow": rng.choice([f"{angle} degree elbows", f"{angle}° elbows", f"{angle} deg elbows"])}[cat]
+        distract = rng.sample([f"PO {rng.randint(10000, 99999)}.", f"Job #{rng.randint(1000, 9999)}.", f"Need by {rng.choice(['Oct', 'Nov', 'Dec'])} {rng.randint(2, 28)}.",
+                               f"Call {rng.randint(200, 989)}-555-{rng.randint(1000, 9999)}.", f"Need it in {rng.randint(2, 8)} weeks.", "Same as last order."], k=rng.randint(1, 3))
+        qty_phrase = f"{qty_text} {uom_word}".strip()
+        body = rng.choice([
+            f"Hi, need {qty_phrase} {'of ' if cat == 'pipe' else ''}{size_txt} {rate_txt} {mat_txt} {cat_txt}.",
+            f"Can you quote {qty_phrase} {'of ' if cat == 'pipe' else ''}{size_txt} {cat_txt}, {rate_txt}, {mat_txt}? Thanks.",
+            f"Quote {qty_phrase} {'of ' if cat == 'pipe' else ''}{cat_txt}, {size_txt}, {rate_txt}, {mat_txt}.",
+            f"We are replacing a {size_txt} run. Looking for {qty_phrase} {'of ' if cat == 'pipe' else ''}{rate_txt} {mat_txt} {cat_txt}.",
+        ])
+        text = f"{body} {' '.join(distract)}"
+        truth = {"qty": qty, "qty_uom": uom, "category": cat, "material": mat, "size_unit": "IPS", "rating_system": system,
+                 "size_in": float(size), "size_raw": f"{size:g} IPS", "rating": f"{system}{rating}", "angle": None if angle is None else str(angle)}
+        out.append((text, find_sku(mat, cat, angle, size, f"{system}{rating}"), truth))
+    return out
+
+
 # ------------------------------------------------------ simulated fast search (no Jev)
 def tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9.]+", text.lower().replace(",", ""))
@@ -187,6 +238,10 @@ def arg(name: str, default, cast=float):
 BUDGET = arg("--budget", 12_000, int)  # est. input tokens per call; published limit is 64k (32k state + longest question). Swept 3k-48k: harmonic mean of accuracy and throughput peaks at ~12k (9 products/call)
 CONF_MIN = arg("--min-conf", 0.6)  # Choice confidence below this -> the field is treated as null
 COPIES = arg("--copies", 1, int)
+GEN = arg("--gen", 0, int)  # generate this many distinct emails (with known ground truth) instead of the 10 fixed ones
+GEN_SEED = arg("--gen-seed", 0, int)
+PER_CALL = arg("--per-call", 0, int)  # fixed products per call (overrides --budget packing): batch size assigned directly
+SHUFFLE = arg("--shuffle", -1, int)  # >=0: shuffle product order with this seed before packing (randomizes call and position)
 MAX_RETRIES = arg("--max-retries", 2, int)  # SDK default 2 silently retries 429s; use 0 to make every 429 visible and counted
 QUIET, NO_REPORT, NO_ORACLE = "--quiet" in sys.argv, "--no-report" in sys.argv, "--no-oracle" in sys.argv
 WRONG_COST = arg("--wrong-cost", 1.0)  # min-conf curve utility: +1 per correct field, -WRONG_COST per wrong field, 0 per abstention
@@ -251,7 +306,9 @@ def per_product_chars(email: str) -> int:
 
 
 def pack(items: list[dict]) -> list[list[dict]]:
-    """Greedy: keep adding products to the call until the estimated token budget is hit."""
+    """Greedy: keep adding products to the call until the estimated token budget is hit (or exactly --per-call per call)."""
+    if PER_CALL:
+        return [items[k:k + PER_CALL] for k in range(0, len(items), PER_CALL)]
     batches, cur, used = [], [], 0.0
     for it in items:
         cost = per_product_chars(it["email"]) / CPT
@@ -327,6 +384,8 @@ def unpack(c, k: int) -> dict:
 def run_batch(R, items: list[dict], tries: int = 0) -> list[dict]:
     T = R["tracker"]
     bid = T.new_batch(len(items))
+    for k, it in enumerate(items):
+        it["pos"], it["B"] = k, len(items)  # position within the call and the call's size, recorded for analysis
     try:
         T.start(bid, "search")
         for it in items:
@@ -410,7 +469,7 @@ def field_score(done: list[dict], fields: list[str]) -> list[str]:
     for f in fields:
         right = wrong = abst = 0
         for it in done:
-            want = TRUTH[it["i"] % len(EMAILS)][f]
+            want = it["truth"][f]
             if want is None:
                 continue  # field doesn't apply to this product (e.g. no bend angle on a pipe)
             got = it["spec"].get(f)
@@ -442,7 +501,7 @@ def oracle_rerank(R, done: list[dict]) -> dict[int, str]:
         qs = {}
         for k, it in enumerate(b):
             qs.update(rerank_qs(k, it["shortlist"], random.Random(it["i"])))
-        state = {"products": [{"text": it["email"], "extracted": TRUTH[it["i"] % len(EMAILS)]} for it in b]}
+        state = {"products": [{"text": it["email"], "extracted": it["truth"]} for it in b]}
         r = R["client"].system_one(state=state, model=MODEL, questions={k: R["Choice"](instructions=v["instr"], criteria=v["crit"]) for k, v in qs.items()})
         return {it["i"]: r.choices[f"{k}:match"].choice for k, it in enumerate(b)}
 
@@ -488,7 +547,7 @@ def conf_curve(done: list[dict]) -> str:
         for name, fields in (("p1", PASS1_FIELDS), ("p2", PASS2_FIELDS), ("all", PASS1_FIELDS + PASS2_FIELDS)):
             right = wrong = abst = 0
             for it in done:
-                sp, truth = spec_at(it, t), TRUTH[it["i"] % len(EMAILS)]
+                sp, truth = spec_at(it, t), it["truth"]
                 for f in fields:
                     if truth[f] is None:
                         continue
@@ -549,11 +608,18 @@ def describe(spec: dict) -> str:
 
 
 def main() -> None:
+    global WORKERS
     offline = "--offline" in sys.argv
-    items = [{"i": n * len(EMAILS) + i, "email": e, "gold": gold_sku(g)} for n in range(COPIES) for i, (e, g) in enumerate(EMAILS)]
+    if GEN:
+        base = generate_emails(GEN, GEN_SEED)
+        items = [{"i": n * GEN + i, "email_id": i, "email": e, "gold": g, "truth": t} for n in range(COPIES) for i, (e, g, t) in enumerate(base)]
+    else:
+        items = [{"i": n * len(EMAILS) + i, "email_id": i, "email": e, "gold": gold_sku(g), "truth": TRUTH[i]} for n in range(COPIES) for i, (e, g) in enumerate(EMAILS)]
+    if SHUFFLE >= 0:
+        random.Random(SHUFFLE).shuffle(items)  # random assignment of products to calls and positions
 
     if offline:
-        for it in items[: len(EMAILS)]:
+        for it in sorted(items, key=lambda x: x['i'])[:10]:
             skus = [p["sku"] for p in fast_search(it["email"])]
             print(f"#{it['i']:>2} gold={it['gold']} search_rank={skus.index(it['gold']) + 1 if it['gold'] in skus else None}")
         return
@@ -565,6 +631,9 @@ def main() -> None:
     from typesafe_sdk import Choice, RetryPolicy, TypeSafeClient
 
     batches = pack(items)
+    if PER_CALL and "--workers" not in sys.argv:  # in flight so that (tokens per call x calls in flight) stays inside the token rate
+        est_call = sum(per_product_chars(it["email"]) for it in items) / len(items) * PER_CALL / CPT
+        WORKERS = max(1, min(RATE_RPS, int(RATE_TPS // est_call)))
     R = {"client": TypeSafeClient(timeout=120.0, retry=RetryPolicy(max_retries=MAX_RETRIES)), "Choice": Choice, "tracker": Tracker()}
     print(f"{len(items)} products packed into {len(batches)} batch(es) of {[len(b) for b in batches]} "
           f"(budget {BUDGET:,} est. tok/call, {WORKERS} in flight, null fields below conf {CONF_MIN})\n", flush=True)
@@ -598,12 +667,13 @@ def main() -> None:
         base_top1 += before == 1
         new_top1 += ok
         nulls = [f for ps in it["passes"] for f, v in ps["fields"].items() if v["nulled"]]
-        if it["i"] < len(EMAILS):
+        if it["i"] < 10:
             print(f"\n#{it['i'] + 1} {it['email']}\n  extracted: {describe(it['spec'])}" + (f"   nulled (low conf): {', '.join(nulls)}" if nulls else ""))
             print(f"  => {'RIGHT' if ok else 'WRONG'}: top pick {order[0]} ({it['ranked'][0][1]:.2f}); gold {gold or 'none exists'}, search rank {before}")
         records.append({"i": it["i"] + 1, "email": it["email"], "gold": gold, "search_rank": before, "ok": ok, "spec": it["spec"],
                         "passes": it["passes"], "shortlist": [p["sku"] + "|" + p["desc"] for p in it["shortlist"]],
-                        "ranked": it["ranked"], "rerank_conf": it["rconf"], "batch": it["bid"], "nulls": nulls})
+                        "ranked": it["ranked"], "rerank_conf": it["rconf"], "batch": it["bid"], "nulls": nulls,
+                        "pos": it["pos"], "B": it["B"], "email_id": it["email_id"], "truth": it["truth"]})
 
     n = len(items)
     tokens = sum(it["tokens"] for it in done)
