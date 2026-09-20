@@ -289,3 +289,36 @@ RIGHT by call size and position bucket (300 generated emails, shuffled; n per ce
 
 The pooled "positions 0-13: 99.4%" figure in this section averages over all call sizes; "16 per call: 99.6%" averages positions
 0-15 within calls of 16. Next step: add a position × call-size interaction to `fit.py`.
+
+## 11. Haystack (mid/late-call dip): failed experiment, weak apparent effect, needs more data
+
+Question: is there a dip in accuracy at some relative position in a call (the profiles for calls of 20 and 24 were
+99.0 / 94.5 / 96.9 and 99.3 / 95.8 / 88.5 / 92.2 by slot bucket, i.e. a trough around 2/3 to 3/4 of the call and a partial
+recovery at the end), beyond the right-hand degradation that grows with call size?
+
+Data: 20,589 product-runs from calls of 12 or more (seed 0: 3,600; seed 1: 16,989; 981 calls; no nulling; dense call sizes 14-32
+on seed 1). Logistic model with a control (slot spline + call size, and a variant with slot × call-size interactions +
+email-difficulty covariates), SEs clustered by call. Term under test: a Gaussian bump (sd 0.12) at relative position c, or a
+parabola `1 − 4(u − 0.5)²` in relative position u = slot / (call size − 1). Estimates are log-odds; effect in RIGHT points over
+the region the term covers; "family" = interval widened for 6 tests.
+
+| Term (control with interactions, pooled) | Estimate | 95% CI | Excludes 0? | Family CI | Excludes 0? | Effect on RIGHT (pts) |
+|---|---|---|---|---|---|---|
+| Bump at 50% | −0.30 | [−0.79, +0.19] | no | [−0.96, +0.36] | no | −0.4 [−1.4, +0.2] |
+| Bump at 65% | +0.30 | [−0.05, +0.66] | no | [−0.17, +0.78] | no | +1.4 [−0.3, +2.8] |
+| Bump at 80% | −0.33 | [−0.61, −0.05] | yes | [−0.71, +0.05] | no | −2.4 [−4.7, −0.3] |
+| U-shape (interior vs ends) | −1.29 | [−2.07, −0.51] | yes | [−2.34, −0.24] | yes | −2.6 [−5.2, −0.8] |
+
+U-shape term by seed: seed 0 −2.09 [−4.24, +0.06] (includes 0); seed 1 −1.20 [−2.04, −0.35]. With the simpler control the 80% bump is
+−0.73 [−0.95, −0.50] (−5.0 pts) and the U-shape −1.64 [−2.09, −1.18].
+
+Verdict: **inconclusive.** There is apparent evidence of a weak effect (the U-shape term excludes 0 pooled, about −2 to −3 pts, a
+broad mid-to-late trough with partial recovery at the end), but (1) the analysis frame was mine and chosen after looking at the
+data (coordinate, bump centers and width, spline knots, controls, subset), across many looks (thirds, slot buckets, fifths,
+bumps, U-term), so the family-wise adjustment for 6 tests understates the multiplicity; (2) the estimate moves with the
+control (−1.64 vs −1.29; the 80% bump −5.0 vs −2.4 pts); (3) seed 0 alone includes 0; (4) a localized dip at the middle is not
+distinguishable from 0; (5) adding the terms improves out-of-sample log-loss by about 0.0001; (6) the claim is about shape over
+a range that changes with call size, and absolute slot explained the data much better than relative position (CV error
+−10.7% vs −1.9%). Needed to settle it: a contrast fixed in advance, a control fit on seeds 0-1 and the contrast evaluated on a
+fresh seed, and more calls at sizes 20-28. It has no practical bearing at the operating point (16 per call: RIGHT 99.6%).
+The analysis was run as side scripts that are not in the repo; the 57 dense-size runs are in the git-ignored `runs/`.

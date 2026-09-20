@@ -36,6 +36,10 @@
   as well: slots 14-15 are 99.3% in calls of 16 but 93-96% in calls of 20+, while slots 0-13 stay ~99% at every size. The additive
   model cannot express that position x call-size interaction. Cap products per call near 16 (B\*).
 
+* **The haystack (mid/late-call dip) analysis is exploratory and inconclusive** (METRICS.md section 11): a weak apparent effect
+  (about −2 to −3 pts, U-shape term excludes 0 pooled) from an analysis frame chosen after looking at the data, many looks,
+  control-dependent estimates and no fresh-data confirmation. Do not build on it; it does not matter at 16 per call.
+
 ## Nulls (abstentions)
 
 * Any Choice answer with confidence below `--min-conf` (default 0.6) becomes `null`, and so does a `none` answer. The 0.6
