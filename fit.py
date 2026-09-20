@@ -31,27 +31,40 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def load(runs_dir: str) -> dict[str, np.ndarray]:
+def load(runs_dir: str, design: str = "auto") -> dict[str, np.ndarray]:
+    """design: 'designed' = runs from collect.py --gen (assigned batch size, generated emails); 'legacy' = the 10 fixed
+    emails in fixed order; 'auto' = designed if any exist, else all."""
+    paths = sorted(glob.glob(os.path.join(runs_dir, "*.json")))
+    docs = [(p, json.load(open(p))) for p in paths]
+    if design == "auto":
+        design = "designed" if any(d.get("gen") for _, d in docs) else "all"
     rows = collections.defaultdict(list)
-    for path in sorted(glob.glob(os.path.join(runs_dir, "*.json"))):
-        d = json.load(open(path))
+    for path, d in docs:
+        if (design == "designed" and not d.get("gen")) or (design == "legacy" and d.get("gen")):
+            continue
         by_batch = collections.defaultdict(list)
         for r in d["records"]:
             by_batch[r["batch"]].append(r)
         for bid, rs in by_batch.items():
-            for pos, r in enumerate(sorted(rs, key=lambda r: r["i"])):
+            for k, r in enumerate(sorted(rs, key=lambda r: r.get("pos", r["i"]))):
+                t = r.get("truth") or {}
                 rows["y"].append(1.0 if r["ok"] else 0.0)
                 rows["run"].append(os.path.basename(path))
                 rows["cluster"].append(f"{os.path.basename(path)}:{bid}")
-                rows["B"].append(len(rs))
-                rows["pos"].append(pos)
+                rows["B"].append(r.get("B", len(rs)))
+                rows["pos"].append(r.get("pos", k))
                 rows["min_conf"].append(d["min_conf"])
                 rows["n_null"].append(len(r["nulls"]))
-                rows["email"].append((r["i"] - 1) % 10)
+                rows["email"].append(r.get("email_id", (r["i"] - 1) % 10))
                 rows["search_miss"].append(int(r["gold"] is not None and r["search_rank"] is None))
                 rows["no_stock"].append(int(r["gold"] is None))
+                rows["category"].append(t.get("category", ""))
+                rows["material"].append(t.get("material", ""))
+                rows["system"].append(t.get("rating_system", ""))
     D = {k: np.array(v) for k, v in rows.items()}
     D["_mc_levels"] = np.array(sorted(set(D["min_conf"])))  # fixed factor levels, so counterfactual rows keep the same columns
+    D["_n_emails"] = len(set(D["email"].tolist()))
+    D["_design"] = design
     return D
 
 
@@ -79,8 +92,16 @@ def design(D, spec, knots):
             for lv in D["_mc_levels"][1:]:
                 cols.append((D["min_conf"] == lv).astype(float)); names.append(f"min_conf={lv:g}")
         elif term == "email_fe":
-            for e in range(1, 10):
-                cols.append((D["email"] == e).astype(float)); names.append(f"email{e}")
+            if D["_n_emails"] <= 20:  # few distinct emails: one fixed effect each
+                for e in range(1, 10):
+                    cols.append((D["email"] == e).astype(float)); names.append(f"email{e}")
+            else:  # many distinct emails: what makes an email hard, observed from its ground truth
+                for c in ("elbow", "tee", "stub end", "flange adapter"):
+                    cols.append((D["category"] == c).astype(float)); names.append(f"cat={c}")
+                for m in ("PVC", "FPVC"):
+                    cols.append((D["material"] == m).astype(float)); names.append(f"mat={m}")
+                cols += [(D["system"] == "SCH").astype(float), D["search_miss"].astype(float), D["no_stock"].astype(float)]
+                names += ["sys=SCH", "search_miss", "no_stock"]
         elif term == "email_feat":
             cols += [D["search_miss"].astype(float), D["no_stock"].astype(float)]; names += ["search_miss", "no_stock"]
         elif term == "B_x_none":  # B x (correct answer is none): a difference-in-differences style interaction
@@ -138,21 +159,29 @@ def report(D, name, spec, knots, show):
     y = D["y"]
     beta = ols(X, y)
     se, G = cluster_se(X, y, beta, D["cluster"])
+    se_email = cluster_se(X, y, beta, D["email"].astype(str))[0] if D["_n_emails"] > 20 else None
     r2 = 1 - ((y - X @ beta) ** 2).sum() / ((y - y.mean()) ** 2).sum()
     print(f"\n{name}\n   R2 {r2:.3f}   CV-RMSE {cv_rmse(D, spec, knots):.4f}   N {len(y):,}   calls {G:,}")
     for nm, b, s in zip(names, beta, se):
         if any(nm.startswith(p) for p in show):
-            print(f"   {nm:<18} {100 * b:>+8.2f} pts  (se {100 * s:.2f})")
+            extra = f", by email {100 * se_email[names.index(nm)]:.2f}" if se_email is not None else ""
+            mde = f"   min detectable ~{100 * 2.8 * max(s, se_email[names.index(nm)] if se_email is not None else 0):.2f}" if nm in ("B", "pos") else ""
+            print(f"   {nm:<18} {100 * b:>+8.2f} pts  (se by call {100 * s:.2f}{extra}){mde}")
     return dict(zip(names, beta)), X, names
 
 
 def main() -> None:
-    D = load(os.path.join(HERE, "runs"))
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--design", choices=("auto", "designed", "legacy", "all"), default="auto", help="which runs to use (default: designed if present)")
+    D = load(os.path.join(HERE, "runs"), ap.parse_args().design)
     if not len(D.get("y", [])):
         raise SystemExit("No runs found: run collect.py first.")
     y = D["y"]
     print(f"{len(y):,} product observations from {len(np.unique(D['run']))} runs, "
           f"B in [{D['B'].min()}, {D['B'].max()}], min_conf levels {sorted(set(D['min_conf']))}, overall RIGHT {y.mean():.1%}")
+    print(f"design: {D['_design']}; distinct emails {D['_n_emails']}; corr(B, position) = {np.corrcoef(D['B'], D['pos'])[0, 1]:.2f}; "
+          f"min detectable = 2.8 x SE (80% power, alpha 0.05, two-sided)")
 
     show_core = ("B", "min_conf", "n_null", "pos", "search", "no_stock")
     report(D, "1. B only (linear)", ["B"], {}, ("B",))
