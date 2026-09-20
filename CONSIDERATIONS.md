@@ -32,8 +32,9 @@
 * **Position within a call drives the accuracy loss with batch size** (METRICS.md section 10). A first analysis on the 10 fixed
   emails in a fixed order overstated the mid-range loss because position was confounded with which email fell there. With
   randomized order and 300 generated emails: RIGHT stays ~99% up to about position 13 (and ~99.6% at 16 products per call),
-  then falls about 3 pts per position (95.9% at positions 14-17, 84.9% at 18-24, 52.2% beyond 25). Batch size has no effect
-  of its own below ~28 once position is controlled. Cap products per call near 16 (B\*).
+  then falls about 3 pts per position (95.9% at positions 14-17, 84.9% at 18-24, 52.2% beyond 25). The loss depends on call size
+  as well: slots 14-15 are 99.3% in calls of 16 but 93-96% in calls of 20+, while slots 0-13 stay ~99% at every size. The additive
+  model cannot express that position x call-size interaction. Cap products per call near 16 (B\*).
 
 ## Nulls (abstentions)
 

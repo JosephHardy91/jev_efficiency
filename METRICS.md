@@ -263,9 +263,11 @@ Spindle regression (`fit.py --design designed`, email-difficulty features, SEs c
 | min_conf 0.6, direct (n_null controlled) | +1.1 pts; each null costs −6.6 pts |
 | minimum detectable position slope | about 0.2 pts/slot (2.8 × SE) |
 
-Reading: (1) the position effect is real and much steeper than the fixed-email data suggested, but it starts near
-position 14-16, not earlier; up to about 16 products per call there is essentially no loss. (2) Batch size has no effect of its own
-below about 28 once position is controlled; it matters through the late positions it creates. (3) B\* = 16 is
+Reading: (1) accuracy depends on where a product sits in the call **and on how large the call is**: slots 14-15 are 99.3% in calls of
+16 but 93-96% in calls of 20 or more, while slots 0-13 stay near 99% at every call size (RIGHT by call size × position bucket
+in the table below). The additive spindle model above has no position × call-size term, so it forced this onto position
+and reported B as having no effect of its own; treat that as a limitation of the additive form, not a finding. (2) The
+loss comes from late positions in long calls. (3) B\* = 16 is
 also where accuracy is still ~99.6%, so the throughput optimum in section 3 stands: re-running `capacity.py --acc
 "4:.996,8:.997,12:.992,16:.996,20:.981,24:.960,28:.920,32:.809"` gives HM 0.997 at B=16 (burst) and B=14 for the strict
 per-second reserve; the default accuracy table inside `capacity.py` still holds the older interpolated points. (4) `min_conf`
@@ -274,3 +276,16 @@ turns a right answer into `none` (RIGHT 66.8% with a null vs 96.2% without, n = 
 answer is `none` cost little (95.6% vs 98.4%). Nulling helped earlier only because the fixed emails were harder at
 large batch sizes. Caveats: emails are synthetic and templated (easier than real ones), one generator seed, the B > 28
 slope rests on two batch sizes, and knots are chosen from the same data, so standard errors are optimistic.
+
+RIGHT by call size and position bucket (300 generated emails, shuffled; n per cell from 72 to 1,344):
+
+| Call size | Positions 0-13 | 14-15 | 16-19 | 20-27 | 28-31 |
+|---|---|---|---|---|---|
+| 16 | 99.6% | 99.3% | | | |
+| 20 | 99.0% | 94.5% | 96.9% | | |
+| 24 | 99.3% | 95.8% | 88.5% | 92.2% | |
+| 28 | 99.5% | 93.8% | 91.2% | 78.8% | |
+| 32 | 98.8% | 93.1% | 89.6% | 59.7% | 45.8% |
+
+The pooled "positions 0-13: 99.4%" figure in this section averages over all call sizes; "16 per call: 99.6%" averages positions
+0-15 within calls of 16. Next step: add a position × call-size interaction to `fit.py`.
