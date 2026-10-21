@@ -9,7 +9,7 @@ order number -- are in different sentences, different types, linked only by disc
 second sentence's "The number" anaphorically refers back to the sales order just opened).
 No amount of span-sweeping or interval-scheduling fixes that; it's slot-filling, same as
 demo.py's own pass1/pass2 (direct per-field Choice questions over the whole document), plus
-a small attachment step to link fields together when a document has more than one record.
+a real attachment step to link fields together across however many records a document has.
 
 Stage 1  candidate spans   Plain code. Capitalized-word runs, EXCLUDING each sentence's first
                            word (that capital is just grammar, not evidence of a proper noun).
@@ -19,16 +19,18 @@ Stage 1  candidate spans   Plain code. Capitalized-word runs, EXCLUDING each sen
                            truncating the span) because the model has no world-knowledge
                            prior for a made-up company the way it does for a landmark.
                            Capitalization is free and doesn't have that failure mode.
-Stage 2  classify + slot-fill   Jev, 1 batched call: classify each candidate span AS A WHOLE
-                           (not per word) against a type taxonomy, and in the same call,
-                           directly ask for the order number from a candidate set extracted
-                           by regex (same pattern demo.py uses for qty: with_none(opts(...))).
-Stage 3  resolve customer   Fuzzy search (plain code, real source system) against a customers
+                           Order-number candidates come from regex (digit runs).
+Stage 2  classify          Jev, 1 batched call: classify each candidate span AS A WHOLE (not
+                           per word) against a type taxonomy.
+Stage 3  resolve customer  Fuzzy search (plain code, real source system) against a customers
                            index, then Jev reranks only if the shortlist has >1 real candidate.
-Stage 4  attach             Plain code if there's exactly one customer and one order number
-                           (nothing to disambiguate). Jev, 1 batched call, only if a document
-                           has multiple customers AND multiple order numbers and needs to
-                           decide which number belongs to which customer's record.
+Stage 4  attach            Jev, 1 batched call: for EVERY candidate order number, which (if
+                           any) resolved customer does it belong to. Always a real Jev call,
+                           never a count-based shortcut -- "there's only one customer and one
+                           number" is not evidence they're linked, it's just an easy case.
+                           Verified against an adversarial document where the customers and
+                           numbers are introduced in mismatched order, so pairing by order of
+                           mention would silently get both assignments backwards.
 
 Run:
     TYPESAFE_API_KEY=... .venv/bin/python sales_order_pipeline.py
@@ -41,7 +43,13 @@ import time
 MODEL = "jev-latest"
 MIN_CONF = 0.6
 
-TEXT = "We opened a sales order for Jimbo Plumbing. The number is 43328282"
+DOCUMENTS = [
+    "We opened a sales order for Jimbo Plumbing. The number is 43328282",
+    # adversarial: customers are introduced Jimbo-then-Ace, but their numbers are stated
+    # Ace-then-Jimbo -- pairing by order of mention would get both assignments backwards.
+    "We opened two sales orders: one for Jimbo Plumbing and one for Ace Plumbing. "
+    "The order for Ace Plumbing is 91234567, and Jimbo's order is 43328282.",
+]
 
 TYPES = {
     "organization": "A company, agency, team, or institution.",
@@ -87,44 +95,31 @@ def capitalized_runs(text: str) -> list[tuple[int, int, str]]:
     return spans
 
 
-def main() -> None:
-    if not os.environ.get("TYPESAFE_API_KEY"):
-        sys.exit("Set TYPESAFE_API_KEY first.")
-    from typesafe_sdk import Choice, TypeSafeClient
-
-    client = TypeSafeClient()
-    client.system_one(state={}, model=MODEL, questions={"w": Choice(instructions="Say ok.", criteria={"ok": "ok", "none": "n/a"})})
+def process(client, Choice, text: str) -> None:
+    t_total0 = time.perf_counter()
 
     # ---- stage 1: candidate spans (plain code, no Jev, no per-word confidence gating)
-    t0 = time.perf_counter()
-    candidates = capitalized_runs(TEXT)
-    numbers = re.findall(r"\d+", TEXT)  # candidate order numbers, extracted by code like demo.py's qty
-    t_candidates = time.perf_counter() - t0
+    candidates = capitalized_runs(text)
+    numbers = re.findall(r"\d+", text)  # candidate order numbers, extracted by code like demo.py's qty
 
-    # ---- stage 2: classify each whole candidate span + slot-fill the order number, 1 batched call
+    # ---- stage 2: classify each whole candidate span, 1 batched call
     t0 = time.perf_counter()
-    qs = {
+    classify_qs = {
         f"span{k}": Choice(
-            instructions=f'Within the text, classify the exact phrase "{text}" as a whole. What kind of entity is it?',
+            instructions=f'Within the text, classify the exact phrase "{span_text}" as a whole. What kind of entity is it?',
             criteria=TYPES,
         )
-        for k, (i, j, text) in enumerate(candidates)
+        for k, (i, j, span_text) in enumerate(candidates)
     }
-    qs["order_number"] = Choice(
-        instructions="What is the sales order number mentioned in the text?",
-        criteria={**{n: f"a number found in the text: {n}" for n in numbers}, "none": "no order number is stated"},
-    )
-    resp1 = client.system_one(state={"text": TEXT}, model=MODEL, questions=qs)
+    resp1 = client.system_one(state={"text": text}, model=MODEL, questions=classify_qs) if classify_qs else None
     t_classify = time.perf_counter() - t0
 
-    org_candidates = [text for k, (i, j, text) in enumerate(candidates)
-                       if resp1.choices[f"span{k}"].choice == "organization" and resp1.choices[f"span{k}"].confidence >= MIN_CONF]
-    order_number = resp1.choices["order_number"].choice
-    order_number_conf = resp1.choices["order_number"].confidence
+    org_candidates = [span_text for k, (i, j, span_text) in enumerate(candidates)
+                      if resp1.choices[f"span{k}"].choice == "organization" and resp1.choices[f"span{k}"].confidence >= MIN_CONF] if resp1 else []
 
     # ---- stage 3: resolve each organization candidate against the real customers index
     t0 = time.perf_counter()
-    resolved_customers = []
+    resolved_customers = []  # (raw_name, identity, confidence)
     shortlists = {name: fuzzy_search_customer(name) for name in org_candidates}
     multi = {name: cands for name, cands in shortlists.items() if len(cands) > 1}
     rerank_qs, qid_of = {}, {}
@@ -135,7 +130,7 @@ def main() -> None:
                          "candidates from the real customers index. Which one does it actually refer to here, if any?",
             criteria={**{c: CUSTOMERS_INDEX[c]["desc"] for c in cands}, "none": "None of these candidates is correct."},
         )
-    resp2 = client.system_one(state={"text": TEXT}, model=MODEL, questions=rerank_qs) if rerank_qs else None
+    resp2 = client.system_one(state={"text": text}, model=MODEL, questions=rerank_qs) if rerank_qs else None
     for name in org_candidates:
         cands = shortlists[name]
         if len(cands) == 1:
@@ -146,34 +141,59 @@ def main() -> None:
                 resolved_customers.append((name, c.choice, c.confidence))
     t_resolve = time.perf_counter() - t0
 
-    # ---- stage 4: attach customer <-> order number. Trivial (zip) if exactly one of each;
-    # otherwise this is where a real attachment Choice (candidates = the resolved customers)
-    # would be needed to decide which number belongs to which customer's record.
+    # ---- stage 4: attach. Always a real Jev call per candidate number, never a count-based
+    # shortcut -- one customer and one number existing is not evidence they're linked.
     t0 = time.perf_counter()
+    attach_qs = {
+        f"num{k}": Choice(
+            instructions=f'Within the text, the number "{n}" was identified as a candidate sales order number. '
+                         "Which customer does this specific order belong to, if any?",
+            criteria={**{name: CUSTOMERS_INDEX[identity]["desc"] for (name, identity, _) in resolved_customers},
+                      "none": "Not a sales order number, or it cannot be attached to a customer."},
+        )
+        for k, n in enumerate(numbers)
+    } if resolved_customers else {}
+    resp3 = client.system_one(state={"text": text}, model=MODEL, questions=attach_qs) if attach_qs else None
+
     records = []
-    if len(resolved_customers) == 1 and order_number != "none":
-        name, identity, conf = resolved_customers[0]
-        records.append({"customer_raw": name, "customer_id": CUSTOMERS_INDEX[identity]["id"], "order_number": order_number})
-    else:
-        for (name, identity, conf) in resolved_customers:
-            records.append({"customer_raw": name, "customer_id": CUSTOMERS_INDEX[identity]["id"], "order_number": None})
-        if len(resolved_customers) != 1:
-            print(f"NOTE: {len(resolved_customers)} customers detected -- attachment to order numbers needs an explicit "
-                  "Jev linking step (not implemented; this demo text only has one of each).")
+    for k, n in enumerate(numbers):
+        if resp3 is None:
+            continue
+        c = resp3.choices[f"num{k}"]
+        if c.choice == "none":
+            continue
+        identity = next(ident for (name, ident, _) in resolved_customers if name == c.choice)
+        records.append({"customer_raw": c.choice, "customer_id": CUSTOMERS_INDEX[identity]["id"], "order_number": n, "conf": c.confidence})
     t_attach = time.perf_counter() - t0
 
-    print(f"candidate spans: {[text for (i, j, text) in candidates]}")
+    print(f"text: {text!r}")
+    print(f"candidate spans: {[s for (i, j, s) in candidates]}")
     print(f"organization candidates: {org_candidates}")
-    print(f"order number candidates (regex): {numbers}  ->  chosen: {order_number!r} (conf={order_number_conf:.2f})\n")
+    print(f"order number candidates (regex): {numbers}\n")
     print("resolved sales order record(s):")
     for r in records:
         print(f"  {r}")
 
-    print(f"\nstage 1 candidate spans : {t_candidates * 1000:7.2f} ms   (pure code)")
-    print(f"stage 2 classify+slotfill: {t_classify * 1000:7.1f} ms   ({resp1.usage.input_tokens} tok)")
-    print(f"stage 3 resolve customer : {t_resolve * 1000:7.1f} ms   ({resp2.usage.input_tokens if resp2 else 0} tok)")
-    print(f"stage 4 attach           : {t_attach * 1000:7.2f} ms   (pure code)")
-    print(f"e2e                      : {(t_candidates + t_classify + t_resolve + t_attach) * 1000:7.1f} ms")
+    tok2 = resp1.usage.input_tokens if resp1 else 0
+    tok3 = resp2.usage.input_tokens if resp2 else 0
+    tok4 = resp3.usage.input_tokens if resp3 else 0
+    print(f"\nstage 2 classify : {t_classify * 1000:7.1f} ms   ({tok2} tok)")
+    print(f"stage 3 resolve  : {t_resolve * 1000:7.1f} ms   ({tok3} tok)")
+    print(f"stage 4 attach   : {t_attach * 1000:7.1f} ms   ({tok4} tok)")
+    print(f"e2e              : {(time.perf_counter() - t_total0) * 1000:7.1f} ms")
+    print("=" * 80)
+
+
+def main() -> None:
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        sys.exit("Set TYPESAFE_API_KEY first.")
+    from typesafe_sdk import Choice, TypeSafeClient
+
+    client = TypeSafeClient()
+    client.system_one(state={}, model=MODEL, questions={"w": Choice(instructions="Say ok.", criteria={"ok": "ok", "none": "n/a"})})
+
+    for text in DOCUMENTS:
+        process(client, Choice, text)
 
 
 if __name__ == "__main__":
