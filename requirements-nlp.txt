@@ -1,0 +1,2 @@
+# optional: only for attachment_pipeline.py (local dependency parsing)
+spacy
