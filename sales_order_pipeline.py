@@ -19,7 +19,14 @@ Stage 1  candidate spans   Plain code. Capitalized-word runs, EXCLUDING each sen
                            truncating the span) because the model has no world-knowledge
                            prior for a made-up company the way it does for a landmark.
                            Capitalization is free and doesn't have that failure mode.
-                           Order-number candidates come from regex (digit runs).
+                           Order-number candidates come from regex: digit runs UNION
+                           trigger-phrase proximity ("number/code/id/order ... is X").
+                           Digits-only would miss a non-numeric identifier entirely --
+                           Jev never free-text-generates a value (README.md: "Jev only
+                           makes typed judgments ... whose options are built per call"),
+                           so if code never proposes a candidate, there's nothing for any
+                           later stage to pick. Verified on an order identifier that has
+                           no digits at all.
 Stage 2  classify          Jev, 1 batched call: classify each candidate span AS A WHOLE (not
                            per word) against a type taxonomy.
 Stage 3  resolve customer  Fuzzy search (plain code, real source system) against a customers
@@ -49,7 +56,21 @@ DOCUMENTS = [
     # Ace-then-Jimbo -- pairing by order of mention would get both assignments backwards.
     "We opened two sales orders: one for Jimbo Plumbing and one for Ace Plumbing. "
     "The order for Ace Plumbing is 91234567, and Jimbo's order is 43328282.",
+    # non-numeric identifier -- a digits-only regex would propose zero candidates here
+    "We opened a sales order for Jimbo Plumbing. The order code is french-fry-bagel-butt.",
 ]
+
+NUMERIC_RE = re.compile(r"\d+")
+TRIGGER_RE = re.compile(r"\b(?:number|code|id|order)\b[^.]*?\bis\b\s+([\w-]+)", re.IGNORECASE)
+
+
+def identifier_candidates(text: str) -> list[str]:
+    """Order-identifier candidates: digit runs UNION trigger-phrase proximity. Digits-only
+    would miss a non-numeric identifier entirely -- code must propose every plausible
+    candidate, since Jev only ever picks from what it's given, never free-text-generates."""
+    numeric = NUMERIC_RE.findall(text)
+    triggered = [m.rstrip(".") for m in TRIGGER_RE.findall(text)]
+    return list(dict.fromkeys(numeric + triggered))
 
 TYPES = {
     "organization": "A company, agency, team, or institution.",
@@ -100,7 +121,7 @@ def process(client, Choice, text: str) -> None:
 
     # ---- stage 1: candidate spans (plain code, no Jev, no per-word confidence gating)
     candidates = capitalized_runs(text)
-    numbers = re.findall(r"\d+", text)  # candidate order numbers, extracted by code like demo.py's qty
+    numbers = identifier_candidates(text)
 
     # ---- stage 2: classify each whole candidate span, 1 batched call
     t0 = time.perf_counter()
