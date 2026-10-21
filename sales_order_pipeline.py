@@ -46,6 +46,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 
 MODEL = "jev-latest"
 MIN_CONF = 0.6
@@ -89,9 +90,20 @@ CUSTOMERS_INDEX = {
 }
 
 
+# word document-frequency across the index: a word shared by EVERY entry (e.g. "plumbing"
+# here) carries no discriminating signal and must not drive a match on its own, or every
+# customer in a one-trade index would fuzzy-match every other one.
+_CUSTOMER_WORDS = {name: set(name.replace("'", " ").split()) for name in CUSTOMERS_INDEX}
+_WORD_DOC_FREQ = Counter(w for ws in _CUSTOMER_WORDS.values() for w in ws)
+_GENERIC_WORDS = {w for w, c in _WORD_DOC_FREQ.items() if c == len(CUSTOMERS_INDEX)}
+
+
 def fuzzy_search_customer(text: str) -> list[str]:
-    words = set(text.lower().replace("'", " ").split())
-    return [name for name in CUSTOMERS_INDEX if words & set(name.replace("'", " ").split())]
+    exact = text.lower()
+    if exact in CUSTOMERS_INDEX:  # an exact match always wins over partial word overlap
+        return [exact]
+    words = set(exact.replace("'", " ").split()) - _GENERIC_WORDS
+    return [name for name in CUSTOMERS_INDEX if words & (_CUSTOMER_WORDS[name] - _GENERIC_WORDS)]
 
 
 def capitalized_runs(text: str) -> list[tuple[int, int, str]]:
