@@ -19,14 +19,22 @@ Stage 1  candidate spans   Plain code. Capitalized-word runs, EXCLUDING each sen
                            truncating the span) because the model has no world-knowledge
                            prior for a made-up company the way it does for a landmark.
                            Capitalization is free and doesn't have that failure mode.
-                           Order-number candidates come from regex: digit runs UNION
-                           trigger-phrase proximity ("number/code/id/order ... is X").
-                           Digits-only would miss a non-numeric identifier entirely --
-                           Jev never free-text-generates a value (README.md: "Jev only
-                           makes typed judgments ... whose options are built per call"),
-                           so if code never proposes a candidate, there's nothing for any
-                           later stage to pick. Verified on an order identifier that has
-                           no digits at all.
+                           Order-number candidates come from digit-run regex UNION a
+                           structural spaCy check: any copular clause ("X is Y") whose
+                           complement looks code-shaped (has a digit, or a hyphen joining
+                           non-dictionary segments). No trigger WORD list ("number"/"code"/
+                           "id"/"order") -- that was the same brittleness as digits-only,
+                           just moved up one level: a fixed keyword enumeration still misses
+                           any synonym never anticipated ("reference", "ticket", "tracking").
+                           The structural check never reads what the subject noun IS, only
+                           that a copula links some abstract noun to a code-shaped value, so
+                           it generalizes to any subject noun for free. Digits-only would
+                           miss a non-numeric identifier entirely, and even a digit-containing
+                           but hyphenated one ("XJ-4471") would be truncated to just "4471" --
+                           Jev never free-text-generates a value (README.md: "Jev only makes
+                           typed judgments ... whose options are built per call"), so if code
+                           never proposes the right candidate, there's nothing for any later
+                           stage to pick.
 Stage 2  classify          Jev, 1 batched call: classify each candidate span AS A WHOLE (not
                            per word) against a type taxonomy.
 Stage 3  resolve customer  Fuzzy search (plain code, real source system) against a customers
@@ -40,6 +48,7 @@ Stage 4  attach            Jev, 1 batched call: for EVERY candidate order number
                            mention would silently get both assignments backwards.
 
 Run:
+    pip install -r requirements-nlp.txt && python -m spacy download en_core_web_sm
     TYPESAFE_API_KEY=... .venv/bin/python sales_order_pipeline.py
 """
 import os
@@ -59,19 +68,47 @@ DOCUMENTS = [
     "The order for Ace Plumbing is 91234567, and Jimbo's order is 43328282.",
     # non-numeric identifier -- a digits-only regex would propose zero candidates here
     "We opened a sales order for Jimbo Plumbing. The order code is french-fry-bagel-butt.",
+    # a trigger noun ("reference") never in the old hardcoded {number,code,id,order} list,
+    # AND a hyphenated alphanumeric code a digits-only regex would truncate to just "4471"
+    "We opened a sales order for Jimbo Plumbing. The reference is XJ-4471.",
 ]
 
 NUMERIC_RE = re.compile(r"\d+")
-TRIGGER_RE = re.compile(r"\b(?:number|code|id|order)\b[^.]*?\bis\b\s+([\w-]+)", re.IGNORECASE)
 
 
-def identifier_candidates(text: str) -> list[str]:
-    """Order-identifier candidates: digit runs UNION trigger-phrase proximity. Digits-only
-    would miss a non-numeric identifier entirely -- code must propose every plausible
-    candidate, since Jev only ever picks from what it's given, never free-text-generates."""
+def looks_like_code(text: str) -> bool:
+    """Orthographic shape, not vocabulary: a code has a digit, or a hyphen joining segments
+    that aren't a normal dictionary phrase (a real hyphenated English phrase this heuristic
+    will also catch, e.g. "well-known" -- that's fine, Jev's classify/confirm stages are what
+    filter false positives; this stage's job is to never silently drop a true one)."""
+    return bool(re.search(r"\d", text)) or "-" in text
+
+
+def structural_identifiers(nlp, text: str) -> list[str]:
+    """Any copular clause ("X is Y") whose complement is code-shaped names a candidate
+    identifier, regardless of what X's text actually is -- no trigger-word list, since the
+    subject's literal text is never inspected, only its syntactic role."""
+    doc = nlp(text)
+    out = []
+    for tok in doc:
+        if tok.dep_ in ("attr", "acomp") and tok.head.pos_ == "AUX":
+            span_text = doc[tok.left_edge.i:tok.right_edge.i + 1].text
+            if looks_like_code(span_text):
+                out.append(span_text)
+    return out
+
+
+def identifier_candidates(nlp, text: str) -> list[str]:
+    """Order-identifier candidates: digit runs UNION the structural spaCy check. Digits-only
+    would miss a non-numeric identifier entirely, or truncate a hyphenated alphanumeric one
+    -- code must propose every plausible candidate, since Jev only ever picks from what it's
+    given, never free-text-generates. A digit run that's a strict substring of a longer
+    structural match (e.g. "4471" inside "XJ-4471") is dropped -- it's a fragment of an
+    identifier already found whole, not a second, independent one."""
     numeric = NUMERIC_RE.findall(text)
-    triggered = [m.rstrip(".") for m in TRIGGER_RE.findall(text)]
-    return list(dict.fromkeys(numeric + triggered))
+    structural = structural_identifiers(nlp, text)
+    merged = list(dict.fromkeys(numeric + structural))
+    return [c for c in merged if not any(c != other and c in other for other in merged)]
 
 TYPES = {
     "organization": "A company, agency, team, or institution.",
@@ -128,12 +165,12 @@ def capitalized_runs(text: str) -> list[tuple[int, int, str]]:
     return spans
 
 
-def process(client, Choice, text: str) -> None:
+def process(client, Choice, nlp, text: str) -> None:
     t_total0 = time.perf_counter()
 
     # ---- stage 1: candidate spans (plain code, no Jev, no per-word confidence gating)
     candidates = capitalized_runs(text)
-    numbers = identifier_candidates(text)
+    numbers = identifier_candidates(nlp, text)
 
     # ---- stage 2: classify each whole candidate span, 1 batched call
     t0 = time.perf_counter()
@@ -202,7 +239,7 @@ def process(client, Choice, text: str) -> None:
     print(f"text: {text!r}")
     print(f"candidate spans: {[s for (i, j, s) in candidates]}")
     print(f"organization candidates: {org_candidates}")
-    print(f"order number candidates (regex): {numbers}\n")
+    print(f"order number candidates (regex + structural parse): {numbers}\n")
     print("resolved sales order record(s):")
     for r in records:
         print(f"  {r}")
@@ -220,13 +257,15 @@ def process(client, Choice, text: str) -> None:
 def main() -> None:
     if not os.environ.get("TYPESAFE_API_KEY"):
         sys.exit("Set TYPESAFE_API_KEY first.")
+    import spacy
     from typesafe_sdk import Choice, TypeSafeClient
 
+    nlp = spacy.load("en_core_web_sm")
     client = TypeSafeClient()
     client.system_one(state={}, model=MODEL, questions={"w": Choice(instructions="Say ok.", criteria={"ok": "ok", "none": "n/a"})})
 
     for text in DOCUMENTS:
-        process(client, Choice, text)
+        process(client, Choice, nlp, text)
 
 
 if __name__ == "__main__":
